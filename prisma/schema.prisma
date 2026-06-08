@@ -96,6 +96,34 @@ enum OccupancyStatus {
   ended
 }
 
+enum MeterType {
+  electricity
+  water
+}
+
+// ── Deposit Management (PRD §6.6) ──
+enum DepositMethod {
+  cash
+  transfer
+  qris
+  other
+}
+
+enum DepositStatus {
+  held
+  partially_refunded
+  refunded
+  forfeited
+}
+
+// ── Check-in / Check-out Digital (PRD §6.5) ──
+// Single table for both directions (type enum) — see BACKEND_STATUS note (deviation from the
+// PRD ERD's separate CHECKIN/CHECKOUT tables).
+enum HandoverType {
+  checkin
+  checkout
+}
+
 // ─────────────────────────── Tables ───────────────────────────
 model Tenant {
   id                    String             @id @default(uuid()) @db.Uuid
@@ -125,6 +153,11 @@ model Tenant {
   files          FileObject[]
   invites        Invite[]
   refreshTokens  RefreshToken[]
+  meterReadings  MeterReading[]
+  depositRecords DepositRecord[]
+  handoverRecords HandoverRecord[]
+  expenseCategories ExpenseCategory[]
+  expenses       Expense[]
 
   @@map("tenants")
 }
@@ -253,6 +286,10 @@ model Property {
   occupancies    Occupancy[]
   invoices       Invoice[]
   propertyAccess UserPropertyAccess[]
+  meterReadings  MeterReading[]
+  depositRecords  DepositRecord[]
+  handoverRecords HandoverRecord[]
+  expenses        Expense[]
 
   @@index([tenantId])
   @@map("properties")
@@ -276,9 +313,12 @@ model Room {
 
   tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   property    Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
-  residents   Resident[]
-  occupancies Occupancy[]
-  invoices    Invoice[]
+  residents     Resident[]
+  occupancies   Occupancy[]
+  invoices      Invoice[]
+  meterReadings MeterReading[]
+  depositRecords  DepositRecord[]
+  handoverRecords HandoverRecord[]
 
   @@unique([propertyId, roomNumber])
   @@index([tenantId])
@@ -317,6 +357,8 @@ model Resident {
   room        Room?       @relation(fields: [roomId], references: [id], onDelete: SetNull)
   occupancies Occupancy[]
   invoices    Invoice[]
+  depositRecords  DepositRecord[]
+  handoverRecords HandoverRecord[]
 
   @@index([tenantId])
   @@index([propertyId])
@@ -421,6 +463,37 @@ model Payment {
   @@map("payments")
 }
 
+model MeterReading {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  propertyId       String    @map("property_id") @db.Uuid
+  roomId           String    @map("room_id") @db.Uuid
+  type             MeterType @default(electricity)
+  periodMonth      Int       @map("period_month")
+  periodYear       Int       @map("period_year")
+  previousReading  Decimal   @default(0) @map("previous_reading") @db.Decimal(14, 3)
+  currentReading   Decimal   @map("current_reading") @db.Decimal(14, 3)
+  usage            Decimal   @default(0) @db.Decimal(14, 3)
+  pricePerUnit     Decimal   @map("price_per_unit") @db.Decimal(12, 2)
+  amount           Decimal   @default(0) @db.Decimal(14, 2)
+  photoUrl         String?   @map("photo_url")
+  photoKey         String    @map("photo_key")
+  recordedByUserId String?   @map("recorded_by_user_id") @db.Uuid
+  notes            String?
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, roomId, type, periodMonth, periodYear])
+  @@index([tenantId])
+  @@index([roomId])
+  @@index([propertyId])
+  @@map("meter_readings")
+}
+
 model AuditLog {
   id         String   @id @default(uuid()) @db.Uuid
   tenantId   String   @map("tenant_id") @db.Uuid
@@ -459,4 +532,108 @@ model FileObject {
 
   @@index([tenantId])
   @@map("files")
+}
+
+// ── Deposit Management (PRD §6.6) ──
+model DepositRecord {
+  id               String        @id @default(uuid()) @db.Uuid
+  tenantId         String        @map("tenant_id") @db.Uuid
+  residentId       String        @map("resident_id") @db.Uuid
+  propertyId       String        @map("property_id") @db.Uuid
+  roomId           String?       @map("room_id") @db.Uuid
+  amount           Decimal       @db.Decimal(12, 2)
+  method           DepositMethod @default(cash)
+  receivedDate     DateTime      @map("received_date") @db.Date
+  status           DepositStatus @default(held)
+  refundedAmount   Decimal       @default(0) @map("refunded_amount") @db.Decimal(12, 2)
+  refundedDate     DateTime?     @map("refunded_date") @db.Date
+  deductionAmount  Decimal       @default(0) @map("deduction_amount") @db.Decimal(12, 2)
+  deductionNotes   String?       @map("deduction_notes")
+  notes            String?
+  recordedByUserId String?       @map("recorded_by_user_id") @db.Uuid
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([residentId])
+  @@index([propertyId])
+  @@index([status])
+  @@map("deposit_records")
+}
+
+// ── Check-in / Check-out Digital — berita acara (PRD §6.5) ──
+model HandoverRecord {
+  id                   String       @id @default(uuid()) @db.Uuid
+  tenantId             String       @map("tenant_id") @db.Uuid
+  residentId           String       @map("resident_id") @db.Uuid
+  propertyId           String       @map("property_id") @db.Uuid
+  roomId               String?      @map("room_id") @db.Uuid
+  type                 HandoverType
+  date                 DateTime     @db.Date
+  photoKeys            Json         @default("[]") @map("photo_keys")
+  inventory            Json         @default("[]")
+  initialMeterElectricity Decimal?  @map("initial_meter_electricity") @db.Decimal(14, 3)
+  signatureKey         String?      @map("signature_key")
+  notes                String?
+  recordedByUserId     String?      @map("recorded_by_user_id") @db.Uuid
+  createdAt            DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([residentId])
+  @@index([propertyId])
+  @@index([type])
+  @@map("handover_records")
+}
+
+// ── Finance / Keuangan (PRD §6.12) ──
+// Expense categories per tenant. `isDefault` marks the seeded defaults (Listrik PLN, etc.).
+model ExpenseCategory {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  expenses Expense[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("expense_categories")
+}
+
+// A recorded expense. `propertyId` nullable = tenant-wide overhead (not tied to one property).
+model Expense {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  propertyId       String?  @map("property_id") @db.Uuid
+  categoryId       String   @map("category_id") @db.Uuid
+  amount           Decimal  @db.Decimal(12, 2)
+  date             DateTime @db.Date
+  description      String?
+  vendorName       String?  @map("vendor_name")
+  receiptKey       String?  @map("receipt_key")
+  recordedByUserId String?  @map("recorded_by_user_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property?       @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  category ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([categoryId])
+  @@index([date])
+  @@map("expenses")
 }

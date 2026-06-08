@@ -5,7 +5,7 @@ import { ok } from '../../utils/response';
 import { validate } from '../../middleware/validate';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { rbacGuard, ALL, OWNER_ONLY } from '../../middleware/rbacGuard';
-import { getUsageAndLimits } from '../../services/plan.service';
+import { getUsageAndLimits, featuresForPlan } from '../../services/plan.service';
 import { writeAudit } from '../../services/audit.service';
 import { Errors } from '../../utils/errors';
 
@@ -18,18 +18,12 @@ const PLAN_CAPS: Record<string, { maxProperties: number; maxRooms: number; maxUs
   premium: { maxProperties: 50, maxRooms: 2000, maxUsers: 100 },
 };
 
-const FEATURES: Record<string, Record<string, boolean>> = {
-  basic: { whatsapp: false, paymentGateway: false, reports: false },
-  pro: { whatsapp: true, paymentGateway: false, reports: true },
-  premium: { whatsapp: true, paymentGateway: true, reports: true },
-};
-
 router.get(
   '/',
   rbacGuard(ALL),
   asyncHandler(async (req: Request, res: Response) => {
     const data = await getUsageAndLimits(req.auth!.tenantId);
-    return ok(res, { ...data, features: FEATURES[data.plan] ?? FEATURES.basic });
+    return ok(res, { ...data, features: featuresForPlan(data.plan) });
   }),
 );
 

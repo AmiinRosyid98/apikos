@@ -3,6 +3,7 @@ import { prisma } from '../../config/database';
 import { Errors } from '../../utils/errors';
 import { dec, dateOnly, iso } from '../../utils/serialize';
 import { presignDownloadIfExists } from '../files/files.service';
+import { meterItemsForInvoice } from '../meters/meters.service';
 import type {
   GenerateInvoiceInput,
   CreateInvoiceInput,
@@ -154,8 +155,15 @@ export async function generateInvoices(tenantId: string, input: GenerateInvoiceI
       input.periodMonth,
       resident.checkInDate,
     );
-    const subtotal = pro.amount;
+    const rentAmount = pro.amount;
     const dueDate = dueDateFor(input.periodYear, input.periodMonth, property.billingDay);
+
+    // Meter integration (PRD §6.17): if a meter reading (electricity/water) exists for this
+    // room+period, add it as an invoice item. No reading → rent-only (does NOT block).
+    const meterItems = resident.roomId
+      ? await meterItemsForInvoice(resident.roomId, input.periodMonth, input.periodYear)
+      : [];
+    const subtotal = round2(rentAmount + meterItems.reduce((s, it) => s + it.amount, 0));
 
     try {
       const invoice = await prisma.$transaction(async (tx) => {
@@ -184,9 +192,17 @@ export async function generateInvoices(tenantId: string, input: GenerateInvoiceI
                     ? `Sewa (pro-rata ${pro.daysCharged}/${pro.daysInMonth} hari)`
                     : 'Sewa bulanan',
                   quantity: 1,
-                  unitPrice: subtotal,
-                  amount: subtotal,
+                  unitPrice: rentAmount,
+                  amount: rentAmount,
                 },
+                ...meterItems.map((it) => ({
+                  tenantId,
+                  type: it.type,
+                  description: it.description,
+                  quantity: it.quantity,
+                  unitPrice: it.unitPrice,
+                  amount: it.amount,
+                })),
               ],
             },
           },

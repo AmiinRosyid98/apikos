@@ -15,6 +15,14 @@ const envSchema = z.object({
 
   DATABASE_URL: z.string().url(),
 
+  // Redis (BullMQ queue/worker + future rate-limiter store). LIVE on localhost:6379.
+  REDIS_URL: z.string().url().default('redis://localhost:6379'),
+
+  // Invoice-generation cron schedule (node-cron / BullMQ repeat pattern). Default 00:30 daily.
+  // Timezone is pinned to Asia/Jakarta (WIB) per A9.
+  INVOICE_CRON: z.string().default('30 0 * * *'),
+  INVOICE_CRON_TZ: z.string().default('Asia/Jakarta'),
+
   JWT_ACCESS_SECRET: z.string().min(16),
   JWT_REFRESH_SECRET: z.string().min(16),
   JWT_ACCESS_TTL: z.string().default('15m'),

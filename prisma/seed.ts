@@ -191,6 +191,40 @@ async function main() {
     },
   });
 
+  // Default expense categories (Finance / Keuangan — PRD §6.12).
+  const DEFAULT_EXPENSE_CATEGORIES = [
+    'Listrik PLN',
+    'Internet',
+    'Kebersihan',
+    'Maintenance',
+    'Gaji/Upah',
+    'Lainnya',
+  ];
+  for (const name of DEFAULT_EXPENSE_CATEGORIES) {
+    await prisma.expenseCategory.create({
+      data: { tenantId: tenant.id, name, isDefault: true },
+    });
+  }
+
+  // One demo expense (this month) so cash flow / P&L have data out of the box.
+  const listrik = await prisma.expenseCategory.findFirst({
+    where: { tenantId: tenant.id, name: 'Listrik PLN' },
+  });
+  if (listrik) {
+    await prisma.expense.create({
+      data: {
+        tenantId: tenant.id,
+        propertyId: property.id,
+        categoryId: listrik.id,
+        amount: 350000,
+        date: new Date(Date.UTC(now.getFullYear(), now.getMonth(), 10)),
+        description: 'Tagihan listrik area bersama',
+        vendorName: 'PLN',
+        recordedByUserId: owner.id,
+      },
+    });
+  }
+
   console.log('\n✅ Seed complete.');
   console.log(`   Tenant : ${tenant.name} (${tenant.slug})`);
   console.log(`   Accounts (all password: ${password}):`);

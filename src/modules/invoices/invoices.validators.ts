@@ -64,6 +64,18 @@ export const cancelInvoiceSchema = z.object({
   reason: z.string().min(2).max(500),
 });
 
+/**
+ * Admin/owner on-demand trigger for the scheduled invoice-generation run. Enqueues a BullMQ
+ * job scoped to the caller's tenant. `asOf` (optional) lets an operator simulate a specific
+ * billing day; defaults to "now" in the worker.
+ */
+export const generateRunSchema = z.object({
+  asOf: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+    .optional(),
+});
+
 export const listInvoiceQuery = z.object({
   status: z.enum(['unpaid', 'partial', 'paid', 'overdue', 'cancelled']).optional(),
   property_id: z.string().uuid().optional(),
@@ -76,6 +88,7 @@ export const listInvoiceQuery = z.object({
   sort_order: z.enum(['asc', 'desc']).default('desc'),
 });
 
+export type GenerateRunInput = z.infer<typeof generateRunSchema>;
 export type GenerateInvoiceInput = z.infer<typeof generateInvoiceSchema>;
 export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>;
 export type UpdateInvoiceInput = z.infer<typeof updateInvoiceSchema>;

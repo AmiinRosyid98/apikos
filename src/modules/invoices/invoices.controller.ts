@@ -3,6 +3,7 @@ import { ok, okPaged, buildMeta } from '../../utils/response';
 import { vquery } from '../../middleware/validate';
 import { assertPropertyAccess } from '../../middleware/rbacGuard';
 import { writeAudit } from '../../services/audit.service';
+import { enqueueInvoiceRun } from '../../jobs/queue';
 import * as svc from './invoices.service';
 import type { ListInvoiceQuery } from './invoices.validators';
 
@@ -22,6 +23,27 @@ export async function generate(req: Request, res: Response) {
     newValue: { created: result.created, skipped: result.skipped },
   });
   return ok(res, result, 201);
+}
+
+/**
+ * Owner-only on-demand trigger that enqueues a scheduled-style invoice-generation run for
+ * the caller's tenant (same code path as the daily cron). Useful for testing/operations
+ * without waiting for 00:30 WIB. Returns the enqueued BullMQ job id; the worker performs the
+ * actual generation. Requires the worker process to be running.
+ */
+export async function generateRun(req: Request, res: Response) {
+  const jobId = await enqueueInvoiceRun({
+    tenantId: req.auth!.tenantId,
+    asOf: req.body?.asOf,
+    source: 'admin-trigger',
+  });
+  await writeAudit(req, {
+    action: 'invoice.generate_run',
+    entityType: 'invoice',
+    entityId: req.auth!.tenantId,
+    newValue: { jobId, asOf: req.body?.asOf ?? null },
+  });
+  return ok(res, { jobId, enqueued: true }, 202);
 }
 
 export async function createManual(req: Request, res: Response) {

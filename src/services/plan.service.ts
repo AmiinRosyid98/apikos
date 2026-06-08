@@ -3,6 +3,64 @@ import { Errors } from '../utils/errors';
 
 export type PlanResource = 'property' | 'room' | 'user';
 
+/** Plan → feature flags (PRD §12.2). Centralized so the subscription endpoint and feature
+ *  guards agree. `meterUtility` (electricity/water meter readings) is Pro+ only. */
+export type PlanFeature =
+  | 'whatsapp'
+  | 'paymentGateway'
+  | 'reports'
+  | 'meterUtility'
+  | 'depositManagement'
+  | 'checkinOut';
+
+export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
+  basic: {
+    whatsapp: false,
+    paymentGateway: false,
+    reports: false,
+    meterUtility: false,
+    depositManagement: false,
+    checkinOut: false,
+  },
+  pro: {
+    whatsapp: true,
+    paymentGateway: false,
+    reports: true,
+    meterUtility: true,
+    depositManagement: true,
+    checkinOut: true,
+  },
+  premium: {
+    whatsapp: true,
+    paymentGateway: true,
+    reports: true,
+    meterUtility: true,
+    depositManagement: true,
+    checkinOut: true,
+  },
+};
+
+export function featuresForPlan(plan: string): Record<PlanFeature, boolean> {
+  return PLAN_FEATURES[plan] ?? PLAN_FEATURES.basic;
+}
+
+/**
+ * Feature gate (PRD §12.2). Throws FORBIDDEN (403) when the tenant's plan does not include
+ * the feature. Call inside the relevant flow BEFORE doing work. Demo tenant is `pro` → passes.
+ */
+export async function assertPlanFeature(tenantId: string, feature: PlanFeature): Promise<void> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { subscriptionPlan: true },
+  });
+  if (!tenant) throw Errors.notFound('Tenant not found');
+  if (!featuresForPlan(tenant.subscriptionPlan)[feature]) {
+    throw Errors.forbidden(
+      `The "${feature}" feature is not available on the ${tenant.subscriptionPlan} plan. Upgrade to Pro or Premium.`,
+    );
+  }
+}
+
 /**
  * B2.7 — planGuard. Compares live usage against the tenant's caps and throws
  * PLAN_LIMIT_EXCEEDED (403) when usage >= cap. Call inside create flows BEFORE inserting.
