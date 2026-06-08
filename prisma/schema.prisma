@@ -1,0 +1,462 @@
+// KosManager — Prisma schema (MVP-1). Source of truth: PLAN.md §4.
+// Design fixes applied:
+//   (a) tenant_id on every table (RLS + middleware tenant-guard)
+//   (b) occupancies table for tenancy history
+//   (c) user_property_access pivot (not array)
+//   (d) unique (tenantId, residentId, periodMonth, periodYear) on invoices
+//   (e) AES-256-GCM ciphertext stored in nik / ktpPhotoKey, nikLast4 plaintext
+//   (h) tenant_counters for per-tenant invoice numbering
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── Enums (PLAN §4.3) ───────────────────────────
+enum SubscriptionPlan {
+  basic
+  pro
+  premium
+}
+
+enum SubscriptionStatus {
+  active
+  expired
+  suspended
+}
+
+enum UserRole {
+  owner
+  manager
+  admin
+  finance
+}
+
+enum PropertyType {
+  putra
+  putri
+  campur
+}
+
+enum LateFeeType {
+  flat
+  percentage
+}
+
+enum RoomStatus {
+  empty
+  occupied
+  booking
+  maintenance
+  renovation
+}
+
+enum Gender {
+  male
+  female
+}
+
+enum ResidentStatus {
+  active
+  alumni
+  blacklisted
+}
+
+enum InvoiceStatus {
+  unpaid
+  partial
+  paid
+  overdue
+  cancelled
+}
+
+enum InvoiceItemType {
+  rent
+  electricity
+  water
+  internet
+  other
+}
+
+enum PaymentMethod {
+  cash
+  transfer
+  qris
+  va
+  ewallet
+  other
+}
+
+enum OccupancyStatus {
+  active
+  ended
+}
+
+// ─────────────────────────── Tables ───────────────────────────
+model Tenant {
+  id                    String             @id @default(uuid()) @db.Uuid
+  name                  String
+  slug                  String             @unique
+  subscriptionPlan      SubscriptionPlan   @default(basic) @map("subscription_plan")
+  subscriptionStatus    SubscriptionStatus @default(active) @map("subscription_status")
+  subscriptionExpiresAt DateTime?          @map("subscription_expires_at") @db.Timestamptz
+  maxProperties         Int                @default(1) @map("max_properties")
+  maxRooms              Int                @default(20) @map("max_rooms")
+  maxUsers              Int                @default(2) @map("max_users")
+  waProvider            String?            @map("wa_provider")
+  waApiKeyEnc           String?            @map("wa_api_key_enc")
+  createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime           @updatedAt @map("updated_at") @db.Timestamptz
+
+  counter        TenantCounter?
+  users          User[]
+  properties     Property[]
+  rooms          Room[]
+  residents      Resident[]
+  occupancies    Occupancy[]
+  invoices       Invoice[]
+  invoiceItems   InvoiceItem[]
+  payments       Payment[]
+  auditLogs      AuditLog[]
+  files          FileObject[]
+  invites        Invite[]
+  refreshTokens  RefreshToken[]
+
+  @@map("tenants")
+}
+
+model TenantCounter {
+  tenantId       String @id @map("tenant_id") @db.Uuid
+  invoiceSeqYear Int    @default(0) @map("invoice_seq_year")
+  invoiceSeq     Int    @default(0) @map("invoice_seq")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_counters")
+}
+
+model User {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  email           String    @unique
+  passwordHash    String    @map("password_hash")
+  fullName        String    @map("full_name")
+  phone           String?
+  role            UserRole  @default(owner)
+  isActive        Boolean   @default(true) @map("is_active")
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
+  lastLoginAt     DateTime? @map("last_login_at") @db.Timestamptz
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant         Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  propertyAccess UserPropertyAccess[]
+  refreshTokens  RefreshToken[]
+  passwordResets PasswordReset[]
+  auditLogs      AuditLog[]
+
+  @@index([tenantId])
+  @@map("users")
+}
+
+model UserPropertyAccess {
+  id         String @id @default(uuid()) @db.Uuid
+  tenantId   String @map("tenant_id") @db.Uuid
+  userId     String @map("user_id") @db.Uuid
+  propertyId String @map("property_id") @db.Uuid
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, propertyId])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@map("user_property_access")
+}
+
+model Invite {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  email      String
+  fullName   String    @map("full_name")
+  role       UserRole
+  tokenHash  String    @map("token_hash")
+  propertyIds String[]  @map("property_ids") @db.Uuid
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz
+  acceptedAt DateTime? @map("accepted_at") @db.Timestamptz
+  invitedBy  String    @map("invited_by") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tokenHash])
+  @@map("invites")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model PasswordReset {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  usedAt    DateTime? @map("used_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_resets")
+}
+
+model Property {
+  id                 String       @id @default(uuid()) @db.Uuid
+  tenantId           String       @map("tenant_id") @db.Uuid
+  name               String
+  type               PropertyType @default(campur)
+  address            String
+  city               String
+  province           String
+  lat                Decimal?     @db.Decimal(10, 7)
+  lng                Decimal?     @db.Decimal(10, 7)
+  facilities         Json         @default("[]")
+  billingDay         Int          @default(1) @map("billing_day")
+  lateFeeType        LateFeeType  @default(flat) @map("late_fee_type")
+  lateFeeValue       Decimal      @default(0) @map("late_fee_value") @db.Decimal(12, 2)
+  lateFeeGraceDays   Int          @default(0) @map("late_fee_grace_days")
+  electricityPriceKwh Decimal     @default(0) @map("electricity_price_kwh") @db.Decimal(12, 2)
+  publicSlug         String?      @map("public_slug")
+  isActive           Boolean      @default(true) @map("is_active")
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime     @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant         Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  rooms          Room[]
+  residents      Resident[]
+  occupancies    Occupancy[]
+  invoices       Invoice[]
+  propertyAccess UserPropertyAccess[]
+
+  @@index([tenantId])
+  @@map("properties")
+}
+
+model Room {
+  id         String     @id @default(uuid()) @db.Uuid
+  tenantId   String     @map("tenant_id") @db.Uuid
+  propertyId String     @map("property_id") @db.Uuid
+  roomNumber String     @map("room_number")
+  roomType   String     @map("room_type")
+  floor      Int?
+  areaM2     Decimal?   @map("area_m2") @db.Decimal(8, 2)
+  basePrice  Decimal    @map("base_price") @db.Decimal(12, 2)
+  status     RoomStatus @default(empty)
+  facilities Json       @default("[]")
+  photos     Json       @default("[]")
+  notes      String?
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property    Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  residents   Resident[]
+  occupancies Occupancy[]
+  invoices    Invoice[]
+
+  @@unique([propertyId, roomNumber])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@map("rooms")
+}
+
+model Resident {
+  id              String         @id @default(uuid()) @db.Uuid
+  tenantId        String         @map("tenant_id") @db.Uuid
+  propertyId      String         @map("property_id") @db.Uuid
+  roomId          String?        @map("room_id") @db.Uuid
+  fullName        String         @map("full_name")
+  nikEnc          String?        @map("nik_enc") // AES-256-GCM ciphertext
+  nikLast4        String?        @map("nik_last4") // plaintext last 4 for search/display
+  phone           String
+  email           String?
+  occupation      String?
+  gender          Gender?
+  status          ResidentStatus @default(active)
+  monthlyRent     Decimal        @map("monthly_rent") @db.Decimal(12, 2)
+  checkInDate     DateTime       @map("check_in_date") @db.Date
+  contractEndDate DateTime?      @map("contract_end_date") @db.Date
+  checkOutDate    DateTime?      @map("check_out_date") @db.Date
+  ktpPhotoKeyEnc  String?        @map("ktp_photo_key_enc") // AES-256-GCM ciphertext of R2 key
+  selfieKey       String?        @map("selfie_key")
+  emergencyName   String?        @map("emergency_name")
+  emergencyPhone  String?        @map("emergency_phone")
+  emergencyRelation String?      @map("emergency_relation")
+  internalNotes   String?        @map("internal_notes")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property    Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room        Room?       @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  occupancies Occupancy[]
+  invoices    Invoice[]
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([roomId])
+  @@map("residents")
+}
+
+model Occupancy {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  residentId  String          @map("resident_id") @db.Uuid
+  propertyId  String          @map("property_id") @db.Uuid
+  roomId      String          @map("room_id") @db.Uuid
+  monthlyRent Decimal         @map("monthly_rent") @db.Decimal(12, 2)
+  startDate   DateTime        @map("start_date") @db.Date
+  endDate     DateTime?       @map("end_date") @db.Date
+  status      OccupancyStatus @default(active)
+  endReason   String?         @map("end_reason")
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  // Partial unique index (one active occupancy per room) is added via raw SQL in migration.
+  @@index([tenantId])
+  @@index([residentId])
+  @@index([roomId])
+  @@map("occupancies")
+}
+
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  tenantId      String        @map("tenant_id") @db.Uuid
+  invoiceNumber String        @map("invoice_number")
+  propertyId    String        @map("property_id") @db.Uuid
+  roomId        String?       @map("room_id") @db.Uuid
+  residentId    String        @map("resident_id") @db.Uuid
+  periodMonth   Int           @map("period_month")
+  periodYear    Int           @map("period_year")
+  dueDate       DateTime      @map("due_date") @db.Date
+  subtotal      Decimal       @default(0) @db.Decimal(12, 2)
+  lateFee       Decimal       @default(0) @map("late_fee") @db.Decimal(12, 2)
+  totalAmount   Decimal       @default(0) @map("total_amount") @db.Decimal(12, 2)
+  paidAmount    Decimal       @default(0) @map("paid_amount") @db.Decimal(12, 2)
+  status        InvoiceStatus @default(unpaid)
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property      @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  resident Resident      @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@unique([tenantId, residentId, periodMonth, periodYear])
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([residentId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  invoiceId   String          @map("invoice_id") @db.Uuid
+  type        InvoiceItemType @default(rent)
+  description String
+  quantity    Decimal         @default(1) @db.Decimal(12, 2)
+  unitPrice   Decimal         @map("unit_price") @db.Decimal(12, 2)
+  amount      Decimal         @db.Decimal(12, 2)
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+model Payment {
+  id         String        @id @default(uuid()) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
+  invoiceId  String        @map("invoice_id") @db.Uuid
+  amount     Decimal       @db.Decimal(12, 2)
+  method     PaymentMethod @default(cash)
+  paidAt     DateTime      @map("paid_at") @db.Timestamptz
+  reference  String?
+  proofKey   String?       @map("proof_key")
+  recordedBy String        @map("recorded_by") @db.Uuid
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  userName   String?  @map("user_name")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  oldValue   Json?    @map("old_value")
+  newValue   Json?    @map("new_value")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([entityType])
+  @@index([userId])
+  @@map("audit_logs")
+}
+
+model FileObject {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  key         String   @unique
+  purpose     String
+  contentType String   @map("content_type")
+  sizeBytes   Int      @map("size_bytes")
+  uploadedBy  String   @map("uploaded_by") @db.Uuid
+  isPrivate   Boolean  @default(true) @map("is_private")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("files")
+}
