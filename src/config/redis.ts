@@ -46,4 +46,7 @@ export function createRedisConnection(): IORedis {
 /** Namespaced BullMQ queue names live here so producers/consumers agree on the key. */
 export const QUEUE_NAMES = {
   invoiceGeneration: 'invoice-generation',
+  bookingRelease: 'booking-release',
+  reminderSweep: 'reminder-sweep',
+  paymentReconcile: 'payment-reconcile',
 } as const;

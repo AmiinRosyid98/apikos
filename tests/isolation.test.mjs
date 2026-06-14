@@ -1,18 +1,31 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { get, post, patch, login, registerTenant } from './helpers.mjs';
+import {
+  get, post, patch, login, registerTenant, cleanupTenants, deletePropertiesById,
+} from './helpers.mjs';
+
+// BUG-005: never mutate the seeded `demo-kos` tenant. All disposable tenants
+// registered below are cascade-deleted in this teardown so no orphan
+// `QA Tenant *` / `IsoProp *` rows remain after the run. The one row a test must
+// create inside demo (a `ScopeExtra` property, only when demo has <2 props) is
+// tracked and hard-deleted too so the demo baseline is restored.
+const _demoPropsToDelete = [];
+after(async () => {
+  await deletePropertiesById(_demoPropsToDelete);
+  await cleanupTenants();
+});
 
 test('tenant isolation: tenant B cannot read tenant A property (404, no leak)', async () => {
-  // Tenant A = seeded demo; create a property in A as owner.
-  const aOwner = await login('owner');
+  // Tenant A = a dedicated disposable tenant (NOT the demo tenant); create a property in A.
+  const a = await registerTenant('iso-a');
   const aProp = await post('/properties', {
     name: 'IsoProp ' + Date.now(), type: 'campur', address: 'Jl Isolasi 1', city: 'Bandung', province: 'Jawa Barat',
-  }, { token: aOwner });
+  }, { token: a.token });
   assert.ok(aProp.status >= 200 && aProp.status < 300, `create A prop: ${aProp.status} ${JSON.stringify(aProp.body)}`);
   const aPropId = aProp.body.data.id;
 
-  // Tenant B = fresh registration.
-  const b = await registerTenant('iso');
+  // Tenant B = another fresh registration.
+  const b = await registerTenant('iso-b');
   const bView = await get(`/properties/${aPropId}`, { token: b.token });
   assert.equal(bView.status, 404, `B reading A property must be 404, got ${bView.status}`);
 });
@@ -68,6 +81,7 @@ test('property-access: restricting a user limits list + cross-property → NOT_F
       name: 'ScopeExtra ' + Date.now(), type: 'campur', address: 'Jl Scope 2', city: 'Bandung', province: 'Jawa Barat',
     }, { token: owner });
     if (extra.status >= 200 && extra.status < 300) {
+      _demoPropsToDelete.push(extra.body.data.id); // BUG-005: clean up on teardown
       allProps = (await get('/properties', { token: owner })).body.data;
     }
   }

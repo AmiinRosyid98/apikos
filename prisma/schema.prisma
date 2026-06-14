@@ -96,9 +96,53 @@ enum OccupancyStatus {
   ended
 }
 
+// In-App Notification module (PRD §6.18). Browser push (VAPID/web-push) is DEFERRED — these are
+// in-app notifications only, emitted from existing business events.
+enum NotificationType {
+  payment_received
+  booking_new
+  maintenance_critical
+  contract_expiring
+  invoice_overdue
+  general
+}
+
 enum MeterType {
   electricity
   water
+}
+
+// ── Maintenance Module (PRD §6.14) ──
+enum MaintenancePriority {
+  low
+  medium
+  high
+  critical
+}
+
+enum MaintenanceStatus {
+  open
+  in_progress
+  waiting_parts
+  done
+  cancelled
+}
+
+// ── Dokumen & Kontrak Module (PRD §6.15) ──
+enum ContractStatus {
+  draft
+  active
+  signed
+  expired
+  terminated
+}
+
+enum DocumentType {
+  ktp
+  sim
+  kk
+  contract
+  other
 }
 
 // ── Deposit Management (PRD §6.6) ──
@@ -122,6 +166,93 @@ enum DepositStatus {
 enum HandoverType {
   checkin
   checkout
+}
+
+// ── Booking Management (PRD §6.13) ──
+// Booking-fee method (manual confirmation in MVP — no payment gateway yet).
+enum BookingFeeMethod {
+  cash
+  transfer
+  qris
+  other
+}
+
+enum BookingFeeStatus {
+  unpaid
+  paid
+  waived
+}
+
+// Booking lifecycle state machine: pending → confirmed → converted, or → cancelled / expired.
+enum BookingStatus {
+  pending
+  confirmed
+  converted
+  cancelled
+  expired
+}
+
+// How a booking was submitted (PRD §6.13). `internal` = created by staff via the authenticated
+// /bookings API; `public` = self-service submission via the public booking link (no auth, resolved
+// from the property's public_slug). Lets the existing bookings list distinguish/triage leads.
+enum BookingSource {
+  internal
+  public
+}
+
+// ── WhatsApp + Reminder Otomatis (PRD §6.9, §6.10) ──
+// Template categories. `custom` + `broadcast` skip the (tenant, property, type) uniqueness so
+// multiple may exist; the others are one-per-scope defaults.
+enum WaTemplateType {
+  invoice_new
+  reminder_due
+  reminder_overdue
+  payment_received
+  contract_expiry
+  broadcast
+  custom
+}
+
+// Send-log status. `stub` = recorded but NOT actually sent (StubProvider / demo mode); `sent` =
+// dispatched via a real provider (Fonnte); `queued`/`failed` for the real-provider lifecycle.
+enum WaMessageStatus {
+  queued
+  sent
+  failed
+  stub
+}
+
+// ── Payment Gateway (PRD §6.8) ──
+// Provider that produced the transaction. `stub` = no real money (StubProvider / demo mode);
+// `midtrans` = real Snap/Core API (used only when MIDTRANS_SERVER_KEY is set).
+enum PaymentGatewayProvider {
+  stub
+  midtrans
+}
+
+// Available payment methods. The plan gates WHICH of these a tenant may use (PRD §12.2):
+// Basic = qris only, Pro = qris + va_*, Premium = all.
+enum PaymentGatewayMethod {
+  qris
+  va_bca
+  va_bni
+  va_bri
+  va_mandiri
+  va_permata
+  gopay
+  ovo
+  dana
+  shopeepay
+  linkaja
+}
+
+// Gateway transaction lifecycle. `pending` = charge created, awaiting payment; `paid` = settled
+// (a Payment row is recorded on the invoice); `expired`/`failed` = terminal non-paid states.
+enum PaymentGatewayStatus {
+  pending
+  paid
+  expired
+  failed
 }
 
 // ─────────────────────────── Tables ───────────────────────────
@@ -158,14 +289,31 @@ model Tenant {
   handoverRecords HandoverRecord[]
   expenseCategories ExpenseCategory[]
   expenses       Expense[]
+  bookings       Booking[]
+  waTemplates    WaTemplate[]
+  waMessages     WaMessage[]
+  paymentGatewayTxns PaymentGatewayTxn[]
+  vendors             Vendor[]
+  maintenanceTickets  MaintenanceTicket[]
+  contractTemplates   ContractTemplate[]
+  contracts           Contract[]
+  documents           DocumentRecord[]
+  notifications       Notification[]
+  apiKeys             ApiKey[]
 
   @@map("tenants")
 }
 
 model TenantCounter {
-  tenantId       String @id @map("tenant_id") @db.Uuid
-  invoiceSeqYear Int    @default(0) @map("invoice_seq_year")
-  invoiceSeq     Int    @default(0) @map("invoice_seq")
+  tenantId           String @id @map("tenant_id") @db.Uuid
+  invoiceSeqYear     Int    @default(0) @map("invoice_seq_year")
+  invoiceSeq         Int    @default(0) @map("invoice_seq")
+  // Per-tenant maintenance-ticket numbering (TKT-{YEAR}-{SEQ}). Same pattern as the invoice seq.
+  maintenanceSeqYear Int    @default(0) @map("maintenance_seq_year")
+  maintenanceSeq     Int    @default(0) @map("maintenance_seq")
+  // Per-tenant contract numbering (KTR-{YEAR}-{SEQ}). Same pattern as the invoice seq (PRD §6.15).
+  contractSeqYear    Int    @default(0) @map("contract_seq_year")
+  contractSeq        Int    @default(0) @map("contract_seq")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -183,6 +331,9 @@ model User {
   isActive        Boolean   @default(true) @map("is_active")
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz
   lastLoginAt     DateTime? @map("last_login_at") @db.Timestamptz
+  // Per-type in-app notification on/off prefs (PRD §6.18). NULL = all enabled (handled in code).
+  // Shape: { "payment_received": true, "booking_new": false, ... }. Missing key = enabled.
+  notificationPrefs Json?   @map("notification_prefs")
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   tenant         Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -190,6 +341,7 @@ model User {
   refreshTokens  RefreshToken[]
   passwordResets PasswordReset[]
   auditLogs      AuditLog[]
+  notifications  Notification[]
 
   @@index([tenantId])
   @@map("users")
@@ -275,7 +427,18 @@ model Property {
   lateFeeValue       Decimal      @default(0) @map("late_fee_value") @db.Decimal(12, 2)
   lateFeeGraceDays   Int          @default(0) @map("late_fee_grace_days")
   electricityPriceKwh Decimal     @default(0) @map("electricity_price_kwh") @db.Decimal(12, 2)
-  publicSlug         String?      @map("public_slug")
+  // Acquisition / total investment cost of the property (land+build+furnish). Used by the ROI
+  // report (PRD §6.12 tambahan, §19). Nullable — ROI handles a null/zero investment gracefully
+  // (roiPercent/paybackYears become null; the UI prompts "atur nilai investasi").
+  investmentValue    Decimal?     @map("investment_value") @db.Decimal(14, 2)
+  // Public Landing Page + Public Booking Link (PRD §6.2, §6.13). `publicSlug` is the marketing
+  // URL slug (`/p/:slug`); UNIQUE so it resolves a single tenant. `publicEnabled` gates whether the
+  // public endpoints serve this property at all (disabled OR unknown slug → 404, no existence leak).
+  publicSlug         String?      @unique @map("public_slug")
+  publicEnabled      Boolean      @default(false) @map("public_enabled")
+  // Reminder Otomatis config (PRD §6.10). null → a sane default applied in code. Shape e.g.
+  // { enabled, offsets:{h7,h3,h0,h3plus,h7plus}, contractExpiry:{h30,h14,h7} }.
+  reminderConfig     Json?        @map("reminder_config")
   isActive           Boolean      @default(true) @map("is_active")
   createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz
   updatedAt          DateTime     @updatedAt @map("updated_at") @db.Timestamptz
@@ -290,6 +453,13 @@ model Property {
   depositRecords  DepositRecord[]
   handoverRecords HandoverRecord[]
   expenses        Expense[]
+  bookings        Booking[]
+  waTemplates     WaTemplate[]
+  waMessages      WaMessage[]
+  maintenanceTickets MaintenanceTicket[]
+  contractTemplates ContractTemplate[]
+  contracts         Contract[]
+  documents         DocumentRecord[]
 
   @@index([tenantId])
   @@map("properties")
@@ -319,6 +489,9 @@ model Room {
   meterReadings MeterReading[]
   depositRecords  DepositRecord[]
   handoverRecords HandoverRecord[]
+  bookings        Booking[]
+  maintenanceTickets MaintenanceTicket[]
+  contracts       Contract[]
 
   @@unique([propertyId, roomNumber])
   @@index([tenantId])
@@ -359,6 +532,11 @@ model Resident {
   invoices    Invoice[]
   depositRecords  DepositRecord[]
   handoverRecords HandoverRecord[]
+  // Bookings that converted into THIS resident (normally 0 or 1). Nullable back-ref.
+  convertedFromBookings Booking[]
+  waMessages            WaMessage[]
+  contracts             Contract[]
+  documents             DocumentRecord[]
 
   @@index([tenantId])
   @@index([propertyId])
@@ -416,6 +594,8 @@ model Invoice {
   resident Resident      @relation(fields: [residentId], references: [id], onDelete: Cascade)
   items    InvoiceItem[]
   payments Payment[]
+  waMessages WaMessage[]
+  gatewayTxns PaymentGatewayTxn[]
 
   @@unique([tenantId, residentId, periodMonth, periodYear])
   @@unique([tenantId, invoiceNumber])
@@ -457,6 +637,7 @@ model Payment {
 
   tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  gatewayTxn PaymentGatewayTxn?
 
   @@index([tenantId])
   @@index([invoiceId])
@@ -636,4 +817,351 @@ model Expense {
   @@index([categoryId])
   @@index([date])
   @@map("expenses")
+}
+
+// ── Booking Management (PRD §6.13) ──
+// INTERNAL booking only in this build (public self-service link deferred — see the seam in
+// bookings.service.ts / bookings.routes.ts). Booking fee is confirmed MANUALLY (no payment
+// gateway). State machine: pending → confirmed → converted | cancelled | expired.
+model Booking {
+  id                  String           @id @default(uuid()) @db.Uuid
+  tenantId            String           @map("tenant_id") @db.Uuid
+  propertyId          String           @map("property_id") @db.Uuid
+  // Nullable so a PUBLIC inquiry without a chosen room (room-less lead) can be recorded. An
+  // internal/room-specific booking always sets it. SetNull keeps historical bookings if a room is deleted.
+  roomId              String?          @map("room_id") @db.Uuid
+  prospectName        String           @map("prospect_name")
+  prospectPhone       String           @map("prospect_phone")
+  prospectEmail       String?          @map("prospect_email")
+  plannedCheckInDate  DateTime         @map("planned_check_in_date") @db.Date
+  bookingFeeAmount    Decimal          @default(0) @map("booking_fee_amount") @db.Decimal(12, 2)
+  bookingFeeMethod    BookingFeeMethod @default(cash) @map("booking_fee_method")
+  feeStatus           BookingFeeStatus @default(unpaid) @map("fee_status")
+  feeDueAt            DateTime         @map("fee_due_at") @db.Timestamptz
+  status              BookingStatus    @default(pending)
+  // Submission origin (internal staff vs public link). See BookingSource.
+  source              BookingSource    @default(internal)
+  // Optional prospect message captured on a public submission ("kapan bisa lihat kamar?", etc).
+  message             String?
+  convertedResidentId String?          @map("converted_resident_id") @db.Uuid
+  notes               String?
+  recordedByUserId    String?          @map("recorded_by_user_id") @db.Uuid
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property          Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room              Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  convertedResident Resident? @relation(fields: [convertedResidentId], references: [id], onDelete: SetNull)
+
+  // Only one ACTIVE (pending|confirmed) booking per room — enforced via a partial unique index
+  // added in raw SQL in the migration (Prisma cannot express a partial unique index here).
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([roomId])
+  @@index([status])
+  @@index([source])
+  @@map("bookings")
+}
+
+// ── WhatsApp templates (PRD §6.9) ──
+// A reusable message template per tenant (optionally per property). `body` holds {variabel}
+// placeholders rendered against resident/invoice/property context (see whatsapp.service render).
+// `propertyId` null = tenant-level default. For non-custom/broadcast types, only one template per
+// (tenant, property, type) is allowed (the @@unique below). Custom/broadcast skip uniqueness by
+// using a distinct name.
+model WaTemplate {
+  id         String         @id @default(uuid()) @db.Uuid
+  tenantId   String         @map("tenant_id") @db.Uuid
+  propertyId String?        @map("property_id") @db.Uuid
+  type       WaTemplateType @default(custom)
+  name       String
+  body       String
+  isActive   Boolean        @default(true) @map("is_active")
+  createdAt  DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property? @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  // One default template per (tenant, property, type). propertyId null is treated as a distinct
+  // scope by Postgres (NULLs are distinct), so a tenant default + per-property override coexist.
+  // The service additionally guards custom/broadcast so they never collide on this constraint.
+  @@unique([tenantId, propertyId, type])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@map("wa_templates")
+}
+
+// ── WhatsApp send log (PRD §6.9) ──
+// Every send path (invoice send, broadcast, reminder cron) writes one row here. In STUB mode the
+// row is recorded with status `stub` (message NOT actually sent) so the UI can show "mode demo".
+model WaMessage {
+  id              String          @id @default(uuid()) @db.Uuid
+  tenantId        String          @map("tenant_id") @db.Uuid
+  propertyId      String?         @map("property_id") @db.Uuid
+  residentId      String?         @map("resident_id") @db.Uuid
+  invoiceId       String?         @map("invoice_id") @db.Uuid
+  toPhone         String          @map("to_phone")
+  toName          String?         @map("to_name")
+  templateType    WaTemplateType? @map("template_type")
+  // Reminder dedup marker — e.g. "reminder_due:H-7" / "contract_expiry:H-30". Lets the reminder
+  // sweep be idempotent: a unique (invoice/resident, reminderKey) is never sent twice.
+  reminderKey     String?         @map("reminder_key")
+  body            String
+  status          WaMessageStatus @default(stub)
+  provider        String?
+  providerMessageId String?       @map("provider_message_id")
+  error           String?
+  sentByUserId    String?         @map("sent_by_user_id") @db.Uuid
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+  resident Resident? @relation(fields: [residentId], references: [id], onDelete: SetNull)
+  invoice  Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([residentId])
+  @@index([invoiceId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("wa_messages")
+}
+
+// ── Payment Gateway transaction (PRD §6.8) ──
+// One row per charge. The provider (stub|midtrans) creates it `pending` with rendered instructions
+// (QR string / VA number / e-wallet deeplink). On a verified `paid` webhook a Payment row is
+// recorded on the invoice and linked back here via paymentId, and status flips to `paid`. The whole
+// charge/verify path goes through payment-gateway.service → provider, so swapping the provider in
+// (set MIDTRANS_SERVER_KEY) is a config-only change.
+model PaymentGatewayTxn {
+  id           String                 @id @default(uuid()) @db.Uuid
+  tenantId     String                 @map("tenant_id") @db.Uuid
+  invoiceId    String                 @map("invoice_id") @db.Uuid
+  // Set once the txn is paid and a Payment ledger row has been recorded (links txn ↔ payment).
+  paymentId    String?                @unique @map("payment_id") @db.Uuid
+  provider     PaymentGatewayProvider @default(stub)
+  method       PaymentGatewayMethod
+  // Provider's transaction reference (Midtrans order_id / our stub ref). Unique → webhook idempotency.
+  providerRef  String                 @unique @map("provider_ref")
+  amount       Decimal                @db.Decimal(12, 2)
+  status       PaymentGatewayStatus   @default(pending)
+  // Rendered payment instructions for the UI: { type:'qris'|'va'|'ewallet', qrString?, vaNumber?,
+  // bank?, deeplink?, expiresAt? }.
+  instructions Json?
+  paidAt       DateTime?              @map("paid_at") @db.Timestamptz
+  createdAt    DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, invoiceId])
+  @@index([tenantId])
+  @@index([status])
+  @@map("payment_gateway_txns")
+}
+
+// ── Maintenance Module (PRD §6.14) — INTERNAL only (public tenant-submitted-report link is
+// DEFERRED — see the PUBLIC REPORT SEAM in maintenance.service.ts). Self-contained: no external
+// creds. Vendor DB + tickets + per-room history + optional cost→expense seam.
+
+// A repair/maintenance vendor (tukang). `skill` = keahlian (e.g. listrik/ledeng/AC).
+model Vendor {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  skill     String?
+  phone     String?
+  rating    Decimal? @db.Decimal(2, 1) // 1.0–5.0
+  notes     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant  Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tickets MaintenanceTicket[]
+
+  @@index([tenantId])
+  @@index([tenantId, skill])
+  @@map("vendors")
+}
+
+// A maintenance ticket. `roomId` null = area umum / common area. `ticketNumber` is per-tenant
+// sequential (TKT-{YEAR}-{SEQ}) via tenant_counters.maintenanceSeq. `vendorId` = the assignee.
+model MaintenanceTicket {
+  id               String              @id @default(uuid()) @db.Uuid
+  tenantId         String              @map("tenant_id") @db.Uuid
+  propertyId       String              @map("property_id") @db.Uuid
+  roomId           String?             @map("room_id") @db.Uuid
+  ticketNumber     String              @map("ticket_number")
+  title            String
+  description      String
+  category         String?
+  priority         MaintenancePriority @default(medium)
+  status           MaintenanceStatus   @default(open)
+  vendorId         String?             @map("vendor_id") @db.Uuid
+  photoKeys        Json                @default("[]") @map("photo_keys")
+  cost             Decimal             @default(0) @db.Decimal(12, 2)
+  reportedByUserId String?             @map("reported_by_user_id") @db.Uuid
+  resolvedAt       DateTime?           @map("resolved_at") @db.Timestamptz
+  // Set once when the ticket's cost is logged as a Finance expense (cost→expense seam) — prevents
+  // double-logging on re-runs.
+  expenseId        String?             @map("expense_id") @db.Uuid
+  notes            String?
+  createdAt        DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt        DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  vendor   Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, ticketNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, roomId])
+  @@index([tenantId])
+  @@index([vendorId])
+  @@map("maintenance_tickets")
+}
+
+// ── Dokumen & Kontrak Module (PRD §6.15) ──
+// Customizable contract template per property (`propertyId` null = tenant default). `body` holds
+// {variabel} placeholders rendered against resident/room/property context at generation time.
+model ContractTemplate {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  propertyId String?  @map("property_id") @db.Uuid
+  name       String
+  body       String
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  property Property? @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, propertyId])
+  @@map("contract_templates")
+}
+
+// A generated contract for a resident. `body` is the RENDERED snapshot at generation time (so the
+// document is stable even if the source template later changes). `contractNumber` is per-tenant
+// sequential (KTR-{YEAR}-{SEQ}) via tenant_counters.contractSeq. Signature keys reference uploaded
+// signature image files (presign stub).
+model Contract {
+  id                   String         @id @default(uuid()) @db.Uuid
+  tenantId             String         @map("tenant_id") @db.Uuid
+  residentId           String         @map("resident_id") @db.Uuid
+  propertyId           String         @map("property_id") @db.Uuid
+  roomId               String?        @map("room_id") @db.Uuid
+  templateId           String?        @map("template_id") @db.Uuid
+  contractNumber       String         @map("contract_number")
+  body                 String
+  status               ContractStatus @default(draft)
+  startDate            DateTime       @map("start_date") @db.Date
+  endDate              DateTime       @map("end_date") @db.Date
+  signedAt             DateTime?      @map("signed_at") @db.Timestamptz
+  residentSignatureKey String?        @map("resident_signature_key")
+  ownerSignatureKey    String?        @map("owner_signature_key")
+  notes                String?
+  createdByUserId      String?        @map("created_by_user_id") @db.Uuid
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resident Resident @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  room     Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, contractNumber])
+  @@index([tenantId])
+  @@index([tenantId, residentId])
+  @@index([tenantId, propertyId])
+  @@index([tenantId, status])
+  @@map("contracts")
+}
+
+// Lightweight document registry with optional expiry (KTP/SIM/KK/contract scan/other). `fileKey`
+// references an uploaded file (presign stub). `expiresAt` powers the renewal-notification seam.
+model DocumentRecord {
+  id               String       @id @default(uuid()) @db.Uuid
+  tenantId         String       @map("tenant_id") @db.Uuid
+  residentId       String?      @map("resident_id") @db.Uuid
+  propertyId       String?      @map("property_id") @db.Uuid
+  type             DocumentType @default(other)
+  name             String
+  fileKey          String       @map("file_key")
+  expiresAt        DateTime?    @map("expires_at") @db.Date
+  notes            String?
+  uploadedByUserId String?      @map("uploaded_by_user_id") @db.Uuid
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  resident Resident? @relation(fields: [residentId], references: [id], onDelete: Cascade)
+  property Property? @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, residentId])
+  @@index([tenantId, expiresAt])
+  @@map("documents")
+}
+
+// ── In-App Notification module (PRD §6.18) ──
+// Per-user notification center row, emitted from existing business events by the notification
+// service (best-effort / failure-isolated). `link` is an in-app deep link (e.g. /invoices/:id).
+// `entityType`/`entityId` reference the source business entity (used for idempotency guards too).
+// Browser push (VAPID/web-push) is DEFERRED — see the seam in notification.service.ts.
+model Notification {
+  id         String           @id @default(uuid()) @db.Uuid
+  tenantId   String           @map("tenant_id") @db.Uuid
+  userId     String           @map("user_id") @db.Uuid
+  type       NotificationType
+  title      String
+  body       String
+  link       String?
+  entityType String?          @map("entity_type")
+  entityId   String?          @map("entity_id")
+  isRead     Boolean          @default(false) @map("is_read")
+  readAt     DateTime?        @map("read_at") @db.Timestamptz
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId, isRead])
+  @@index([tenantId])
+  @@index([tenantId, entityType, entityId])
+  @@map("notifications")
+}
+
+// Public API key (PRD Modul 22 — Premium-only). Authenticates third-party REST access to the
+// read-focused external API (/api/ext/v1). The plaintext key is shown ONCE on create and never
+// stored — only its sha256 hash (keyHash) is persisted, plus a short visible prefix (keyPrefix,
+// e.g. "kos_live_AbCd…") for display in the dashboard. Scopes restrict which endpoints the key
+// can reach. The key only works while the owning tenant is on the Premium plan (enforced at
+// auth time), so downgrading instantly disables every key.
+model ApiKey {
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  name            String
+  keyPrefix       String    @map("key_prefix")
+  keyHash         String    @unique @map("key_hash")
+  scopes          Json
+  lastUsedAt      DateTime? @map("last_used_at") @db.Timestamptz
+  expiresAt       DateTime? @map("expires_at") @db.Timestamptz
+  isActive        Boolean   @default(true) @map("is_active")
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz
+  createdByUserId String?   @map("created_by_user_id") @db.Uuid
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([keyPrefix])
+  @@map("api_keys")
 }

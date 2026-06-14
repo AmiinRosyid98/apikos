@@ -1,6 +1,11 @@
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { get, post, put, patch, registerTenant, login } from './helpers.mjs';
+import { get, post, put, patch, registerTenant, login, cleanupTenants } from './helpers.mjs';
+
+// BUG-005: cascade-delete every disposable tenant this suite registers.
+after(async () => {
+  await cleanupTenants();
+});
 
 // Build an isolated fresh tenant with a full data graph so lifecycle tests don't
 // mutate the shared seed. Premium plan is set via change-plan to avoid cap blocks.

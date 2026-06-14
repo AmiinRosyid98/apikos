@@ -6,6 +6,7 @@ import { rbacGuard, ALL, OWNER_ONLY, OWNER_MANAGER, loadPropertyScope } from '..
 import {
   createPropertySchema,
   updatePropertySchema,
+  publicSettingsSchema,
   listPropertyQuery,
 } from './properties.validators';
 
@@ -16,6 +17,8 @@ router.get('/', loadPropertyScope, rbacGuard(ALL), validate(listPropertyQuery, '
 router.post('/', rbacGuard(OWNER_ONLY), validate(createPropertySchema), asyncHandler(ctrl.create));
 router.get('/:id', loadPropertyScope, rbacGuard(ALL), asyncHandler(ctrl.detail));
 router.put('/:id', loadPropertyScope, rbacGuard(OWNER_MANAGER), validate(updatePropertySchema), asyncHandler(ctrl.update));
+// Public landing/booking-link management (PRD §6.2, §6.13) — Owner/Manager only.
+router.patch('/:id/public', loadPropertyScope, rbacGuard(OWNER_MANAGER), validate(publicSettingsSchema), asyncHandler(ctrl.updatePublic));
 router.delete('/:id', rbacGuard(OWNER_ONLY), asyncHandler(ctrl.deactivate));
 
 export default router;

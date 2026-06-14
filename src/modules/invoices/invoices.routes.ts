@@ -21,6 +21,13 @@ import {
   cancelInvoiceSchema,
   listInvoiceQuery,
 } from './invoices.validators';
+// WhatsApp: send an invoice via WA (PRD §6.9). The route lives here (not as a separate
+// /invoices/:id mount) so it never shadows /invoices/generate. Admin+.
+import * as waCtrl from '../whatsapp/whatsapp.controller';
+import { sendInvoiceWaSchema } from '../whatsapp/whatsapp.validators';
+// Payment Gateway (PRD §6.8): charge an invoice / list its gateway txns. Registered HERE (not a
+// separate /invoices/:id mount) so they never shadow /invoices/generate. See payments.routes.ts.
+import { invoiceChargeRoutes } from '../payments/payments.routes';
 
 const router = Router();
 router.use(loadPropertyScope);
@@ -35,5 +42,10 @@ router.put('/:id', rbacGuard(OWNER_MANAGER), validate(updateInvoiceSchema), asyn
 router.post('/:id/payment', rbacGuard(ALL), validate(recordPaymentSchema), asyncHandler(ctrl.recordPayment));
 router.post('/:id/mark-paid', rbacGuard(FINANCE_PLUS), validate(markPaidSchema), asyncHandler(ctrl.markPaid));
 router.patch('/:id/cancel', rbacGuard(OWNER_MANAGER), validate(cancelInvoiceSchema), asyncHandler(ctrl.cancel));
+// Send this invoice via WhatsApp (PRD §6.9) — Admin+. loadPropertyScope is already applied above.
+router.post('/:id/send-wa', rbacGuard(ADMIN_PLUS), validate(sendInvoiceWaSchema), asyncHandler(waCtrl.sendInvoiceWa));
+// Payment Gateway (PRD §6.8): create a charge (Admin+) / list this invoice's gateway txns (All).
+router.post('/:id/charge', ...invoiceChargeRoutes.create);
+router.get('/:id/charges', ...invoiceChargeRoutes.list);
 
 export default router;

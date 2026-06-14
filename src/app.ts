@@ -5,6 +5,7 @@ import { env } from './config/env';
 import { requestId } from './middleware/requestId';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import apiRouter from './routes';
+import { externalRouter } from './modules/external/external.routes';
 
 export function createApp() {
   const app = express();
@@ -27,6 +28,11 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
 
   app.use('/api/v1', apiRouter);
+
+  // Public API (PRD Modul 22) — Premium-only, API-key-authenticated. Mounted OUTSIDE the JWT
+  // /api/v1 router (like the payment webhook + /public landing): the externalRouter applies its
+  // OWN apiKeyAuth + per-key rate limiter + permissive CORS, and resolves the tenant from the key.
+  app.use('/api/ext/v1', externalRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

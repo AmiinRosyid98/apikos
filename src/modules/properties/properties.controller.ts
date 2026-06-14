@@ -41,6 +41,18 @@ export async function update(req: Request, res: Response) {
   return ok(res, updated);
 }
 
+export async function updatePublic(req: Request, res: Response) {
+  assertPropertyAccess(req, req.params.id);
+  const updated = await svc.updatePropertyPublicSettings(req.params.id, req.body);
+  await writeAudit(req, {
+    action: 'property.public_settings',
+    entityType: 'property',
+    entityId: updated.id,
+    newValue: { publicSlug: updated.publicSlug, publicEnabled: updated.publicEnabled },
+  });
+  return ok(res, updated);
+}
+
 export async function deactivate(req: Request, res: Response) {
   const result = await svc.deactivateProperty(req.params.id);
   await writeAudit(req, {

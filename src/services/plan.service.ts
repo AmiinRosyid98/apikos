@@ -1,3 +1,4 @@
+import type { PaymentGatewayMethod } from '@prisma/client';
 import { prisma } from '../config/database';
 import { Errors } from '../utils/errors';
 
@@ -11,7 +12,11 @@ export type PlanFeature =
   | 'reports'
   | 'meterUtility'
   | 'depositManagement'
-  | 'checkinOut';
+  | 'checkinOut'
+  // Public API + API-key management (PRD Modul 22). PREMIUM-ONLY: Basic ❌ / Pro ❌ / Premium ✅.
+  // Gates BOTH the management endpoints (POST /api-keys) AND the external API (/api/ext/v1):
+  // downgrading off Premium instantly disables every key (enforced in apiKeyAuth).
+  | 'apiAccess';
 
 export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
   basic: {
@@ -21,6 +26,7 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     meterUtility: false,
     depositManagement: false,
     checkinOut: false,
+    apiAccess: false,
   },
   pro: {
     whatsapp: true,
@@ -29,6 +35,7 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     meterUtility: true,
     depositManagement: true,
     checkinOut: true,
+    apiAccess: false,
   },
   premium: {
     whatsapp: true,
@@ -37,11 +44,57 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     meterUtility: true,
     depositManagement: true,
     checkinOut: true,
+    apiAccess: true,
   },
 };
 
 export function featuresForPlan(plan: string): Record<PlanFeature, boolean> {
   return PLAN_FEATURES[plan] ?? PLAN_FEATURES.basic;
+}
+
+/**
+ * Monthly WhatsApp send quota per plan (PRD §12.2): Basic 100/mo, Pro 500/mo, Premium unlimited
+ * (null). The `whatsapp` FEATURE is in all plans (so we do NOT hard-block by feature) — the plans
+ * differ only by this monthly quota. `null` = unlimited.
+ */
+export const WA_MONTHLY_QUOTA: Record<string, number | null> = {
+  basic: 100,
+  pro: 500,
+  premium: null,
+};
+
+export function waQuotaForPlan(plan: string): number | null {
+  return plan in WA_MONTHLY_QUOTA ? WA_MONTHLY_QUOTA[plan] : WA_MONTHLY_QUOTA.basic;
+}
+
+/**
+ * Payment-gateway methods available per plan (PRD §12.2 / §6.8):
+ *   - Basic   → QRIS only
+ *   - Pro     → QRIS + all Virtual Accounts (va_*)
+ *   - Premium → all methods (QRIS + VA + e-wallets)
+ *
+ * This REPLACES the misleading `features.paymentGateway` boolean as the source of truth for what a
+ * tenant can charge with: the boolean said "false on Basic" even though Basic gets QRIS. The
+ * subscription endpoint now exposes this method LIST (see featuresForPlan consumers / GET
+ * /payments/methods), and createCharge validates `method ∈ allowedMethodsForPlan(plan)`.
+ */
+const VA_METHODS: PaymentGatewayMethod[] = [
+  'va_bca',
+  'va_bni',
+  'va_bri',
+  'va_mandiri',
+  'va_permata',
+];
+const EWALLET_METHODS: PaymentGatewayMethod[] = ['gopay', 'ovo', 'dana', 'shopeepay', 'linkaja'];
+
+export const PLAN_PAYMENT_METHODS: Record<string, PaymentGatewayMethod[]> = {
+  basic: ['qris'],
+  pro: ['qris', ...VA_METHODS],
+  premium: ['qris', ...VA_METHODS, ...EWALLET_METHODS],
+};
+
+export function allowedMethodsForPlan(plan: string): PaymentGatewayMethod[] {
+  return PLAN_PAYMENT_METHODS[plan] ?? PLAN_PAYMENT_METHODS.basic;
 }
 
 /**
@@ -55,11 +108,42 @@ export async function assertPlanFeature(tenantId: string, feature: PlanFeature):
   });
   if (!tenant) throw Errors.notFound('Tenant not found');
   if (!featuresForPlan(tenant.subscriptionPlan)[feature]) {
+    // apiAccess is Premium-only; the other features are Pro+. Tailor the upgrade hint.
+    const upgradeTo = feature === 'apiAccess' ? 'Premium' : 'Pro or Premium';
     throw Errors.forbidden(
-      `The "${feature}" feature is not available on the ${tenant.subscriptionPlan} plan. Upgrade to Pro or Premium.`,
+      `The "${feature}" feature is not available on the ${tenant.subscriptionPlan} plan. Upgrade to ${upgradeTo}.`,
     );
   }
 }
+
+/**
+ * Resolve a tenant's current plan (used by the API-key auth path which has no JWT/req.auth).
+ */
+export async function getTenantPlan(tenantId: string): Promise<string> {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { subscriptionPlan: true },
+  });
+  if (!tenant) throw Errors.notFound('Tenant not found');
+  return tenant.subscriptionPlan;
+}
+
+/**
+ * apiAccess gate for the EXTERNAL API (PRD Modul 22). Unlike assertPlanFeature (which throws
+ * FORBIDDEN/403), this throws PLAN_LIMIT_EXCEEDED (403) so a downgraded tenant's key surfaces a
+ * clear "your plan no longer includes API access" signal. Called inside apiKeyAuth on every
+ * request, so flipping off Premium disables all keys immediately.
+ */
+export async function assertApiAccessPlan(tenantId: string): Promise<void> {
+  const plan = await getTenantPlan(tenantId);
+  if (!featuresForPlan(plan)[apiAccessFeature]) {
+    throw Errors.planLimit(
+      `The Public API is a Premium-plan feature; your tenant is on the ${plan} plan. Upgrade to Premium to use API keys.`,
+    );
+  }
+}
+
+const apiAccessFeature: PlanFeature = 'apiAccess';
 
 /**
  * B2.7 — planGuard. Compares live usage against the tenant's caps and throws

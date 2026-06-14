@@ -17,6 +17,8 @@ export const createPropertySchema = z.object({
   lateFeeValue: z.number().min(0).optional(),
   lateFeeGraceDays: z.number().int().min(0).max(60).optional(),
   electricityPriceKwh: z.number().min(0).optional(),
+  // Acquisition / total investment cost for the ROI report. Nullable (pass null to clear).
+  investmentValue: z.number().min(0).max(99_999_999_999.99).nullable().optional(),
 });
 
 export const updatePropertySchema = createPropertySchema.partial().extend({
@@ -26,6 +28,25 @@ export const updatePropertySchema = createPropertySchema.partial().extend({
   city: z.string().min(1),
   province: z.string().min(1),
 });
+
+/**
+ * Public landing/booking-link management (PRD §6.2, §6.13). Owner/Manager set or clear the
+ * marketing slug and toggle whether the public endpoints serve this property. Slug format is
+ * `^[a-z0-9-]{3,100}$` (lowercase letters, digits, hyphen). At least one field must be present.
+ * Pass `publicSlug: null` to CLEAR the slug (which also implies the property becomes unreachable).
+ */
+export const publicSettingsSchema = z
+  .object({
+    publicSlug: z
+      .string()
+      .regex(/^[a-z0-9-]{3,100}$/, 'Slug must be 3-100 chars of lowercase letters, digits, or hyphens')
+      .nullable()
+      .optional(),
+    publicEnabled: z.boolean().optional(),
+  })
+  .refine((v) => v.publicSlug !== undefined || v.publicEnabled !== undefined, {
+    message: 'Provide publicSlug and/or publicEnabled',
+  });
 
 export const listPropertyQuery = z.object({
   type: propertyTypeEnum.optional(),
@@ -39,4 +60,5 @@ export const listPropertyQuery = z.object({
 
 export type CreatePropertyInput = z.infer<typeof createPropertySchema>;
 export type UpdatePropertyInput = z.infer<typeof updatePropertySchema>;
+export type PublicSettingsInput = z.infer<typeof publicSettingsSchema>;
 export type ListPropertyQuery = z.infer<typeof listPropertyQuery>;

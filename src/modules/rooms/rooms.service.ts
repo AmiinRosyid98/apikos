@@ -60,6 +60,29 @@ export async function listRoomsByProperty(propertyId: string, q: ListRoomQuery) 
   return { rows: rows.map(serializeRoom), total, propertyId };
 }
 
+/**
+ * Tenant-wide room list (used by the Public API /api/ext/v1/rooms, PRD Modul 22). Unlike
+ * listRoomsByProperty this is not anchored to a single property — it lists all rooms in the
+ * tenant (auto-scoped by the Prisma guard), with optional property_id / status / room_type filters.
+ */
+export async function listRooms(q: ListRoomQuery & { property_id?: string }) {
+  const where: Prisma.RoomWhereInput = {};
+  if (q.property_id) where.propertyId = q.property_id;
+  if (q.status) where.status = q.status;
+  if (q.room_type) where.roomType = q.room_type;
+
+  const [rows, total] = await Promise.all([
+    prisma.room.findMany({
+      where,
+      orderBy: { roomNumber: q.sort_order },
+      skip: (q.page - 1) * q.limit,
+      take: q.limit,
+    }),
+    prisma.room.count({ where }),
+  ]);
+  return { rows: rows.map(serializeRoom), total };
+}
+
 export async function createRoom(tenantId: string, propertyId: string, input: CreateRoomInput) {
   await assertPropertyExists(propertyId);
   await assertPlanCapacity(tenantId, 'room');

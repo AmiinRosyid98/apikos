@@ -45,6 +45,16 @@ function mapPrismaError(err: Prisma.PrismaClientKnownRequestError): AppError {
       return Errors.notFound('Resource not found');
     case 'P2003':
       return Errors.conflict('Related record constraint failed');
+    // Defense-in-depth (BUG-004): malformed input that still reaches Prisma —
+    // e.g. an invalid UUID cast ("Error creating UUID, invalid character") or a
+    // value out of range / wrong type — is a client (422) error, not a 500.
+    // The param middleware is the primary fix; this stops any straggler leaking
+    // the Prisma invocation + source path via the non-prod `detail`.
+    case 'P2023': // "Inconsistent column data" — includes invalid UUID input
+    case 'P2005': // value stored in the DB is invalid for the field's type
+    case 'P2006': // provided value is not valid for the field
+    case 'P2007': // data validation error
+      return Errors.validation('Invalid path or query parameter');
     default:
       // eslint-disable-next-line no-console
       console.error('[prisma]', err.code, err.message);

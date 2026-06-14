@@ -1,6 +1,11 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { post, get, login, loginFull, decodeJwt, registerTenant } from './helpers.mjs';
+import { post, get, login, loginFull, decodeJwt, registerTenant, cleanupTenants } from './helpers.mjs';
+
+// BUG-005: cascade-delete every disposable tenant this suite registers.
+after(async () => {
+  await cleanupTenants();
+});
 
 test('health endpoint up + db up', async () => {
   const r = await get('/health');

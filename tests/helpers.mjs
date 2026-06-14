@@ -80,6 +80,11 @@ export function uniqueEmail(prefix = 'qa') {
   return `${prefix}.${Date.now()}.${_seq}@qa-test.kos`;
 }
 
+// BUG-005: track every tenant we register so suites can cascade-delete them on
+// teardown. Without this, `QA Tenant *` tenants accumulate (reseed only resets
+// `demo-kos`). Each suite must call `await cleanupTenants()` in an `after()` hook.
+const _createdTenantIds = new Set();
+
 /** Register a brand-new tenant+owner; returns { token, refreshToken, tenant, user, email }. */
 export async function registerTenant(label = 'qa') {
   const email = uniqueEmail(label);
@@ -98,11 +103,53 @@ export async function registerTenant(label = 'qa') {
   if (r.status !== 201 && r.status !== 200) {
     throw new Error(`register failed: ${r.status} ${JSON.stringify(r.body)}`);
   }
+  const tenant = r.body.data.tenant;
+  if (tenant?.id) _createdTenantIds.add(tenant.id);
   return {
     token: r.body.data.accessToken,
     refreshToken: r.body.data.refreshToken,
-    tenant: r.body.data.tenant,
+    tenant,
     user: r.body.data.user,
     email,
   };
+}
+
+/**
+ * BUG-005 teardown helper: hard-delete rows the integration suites had to create
+ * inside an *existing* tenant (e.g. a demo `ScopeExtra` property). Cascade-deletes
+ * by id via a direct PrismaClient so reseed isn't required to restore the baseline.
+ */
+export async function deletePropertiesById(ids = []) {
+  const list = ids.filter(Boolean);
+  if (list.length === 0) return;
+  const { PrismaClient } = await import('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    for (const id of list) {
+      await prisma.property.delete({ where: { id } }).catch(() => {});
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+/**
+ * BUG-005 teardown: cascade-delete every tenant registered via registerTenant()
+ * during this process, so no orphan `QA Tenant *` rows remain after a run.
+ * Uses a direct (un-extended) PrismaClient — tenant delete cascades to all
+ * child rows (FKs declared onDelete: Cascade). Never touches `demo-kos`.
+ * Safe to call multiple times (idempotent; clears the tracked set).
+ */
+export async function cleanupTenants() {
+  if (_createdTenantIds.size === 0) return;
+  const { PrismaClient } = await import('@prisma/client');
+  const prisma = new PrismaClient();
+  try {
+    for (const id of _createdTenantIds) {
+      await prisma.tenant.delete({ where: { id } }).catch(() => {});
+    }
+    _createdTenantIds.clear();
+  } finally {
+    await prisma.$disconnect();
+  }
 }

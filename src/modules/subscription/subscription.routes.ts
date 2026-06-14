@@ -5,7 +5,7 @@ import { ok } from '../../utils/response';
 import { validate } from '../../middleware/validate';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { rbacGuard, ALL, OWNER_ONLY } from '../../middleware/rbacGuard';
-import { getUsageAndLimits, featuresForPlan } from '../../services/plan.service';
+import { getUsageAndLimits, featuresForPlan, allowedMethodsForPlan } from '../../services/plan.service';
 import { writeAudit } from '../../services/audit.service';
 import { Errors } from '../../utils/errors';
 
@@ -23,7 +23,14 @@ router.get(
   rbacGuard(ALL),
   asyncHandler(async (req: Request, res: Response) => {
     const data = await getUsageAndLimits(req.auth!.tenantId);
-    return ok(res, { ...data, features: featuresForPlan(data.plan) });
+    // `features.paymentGateway` (boolean) is misleading on its own — Basic still gets QRIS. Expose
+    // the per-plan allowed payment METHOD LIST alongside it (PRD §6.8/§12.2) as the real source of
+    // truth for the UI (also at GET /payments/methods).
+    return ok(res, {
+      ...data,
+      features: featuresForPlan(data.plan),
+      paymentMethods: allowedMethodsForPlan(data.plan),
+    });
   }),
 );
 

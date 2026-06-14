@@ -27,6 +27,9 @@ export function serializeProperty(p: PropertyRow) {
     lateFeeValue: dec(p.lateFeeValue),
     lateFeeGraceDays: p.lateFeeGraceDays,
     electricityPriceKwh: dec(p.electricityPriceKwh),
+    investmentValue: dec(p.investmentValue),
+    publicSlug: p.publicSlug,
+    publicEnabled: p.publicEnabled,
     isActive: p.isActive,
     createdAt: iso(p.createdAt),
   };
@@ -69,6 +72,7 @@ export async function createProperty(tenantId: string, input: CreatePropertyInpu
       lateFeeValue: input.lateFeeValue ?? 0,
       lateFeeGraceDays: input.lateFeeGraceDays ?? 0,
       electricityPriceKwh: input.electricityPriceKwh ?? 0,
+      investmentValue: input.investmentValue ?? null,
     },
   });
   return serializeProperty(created);
@@ -142,9 +146,50 @@ export async function updateProperty(id: string, input: UpdatePropertyInput) {
       lateFeeValue: input.lateFeeValue,
       lateFeeGraceDays: input.lateFeeGraceDays,
       electricityPriceKwh: input.electricityPriceKwh,
+      // undefined → unchanged; null → clear the investment value.
+      investmentValue: input.investmentValue,
     },
   });
   return serializeProperty(updated);
+}
+
+/**
+ * Set/clear the public landing slug + toggle the public link (PRD §6.2, §6.13).
+ *   - `publicSlug` (string)  → set the slug; UNIQUE across all tenants. A clash → 409 CONFLICT.
+ *   - `publicSlug` (null)    → clear the slug (property no longer reachable publicly).
+ *   - `publicEnabled` (bool) → toggle whether the public endpoints serve this property.
+ * Enabling a property that has no slug is rejected (422) — a slug is required to be reachable.
+ * The slug is normalised to lowercase (Zod already enforces the charset). Tenant-scoped via the
+ * guard; the unique-violation race is caught and surfaced as a friendly 409.
+ */
+export async function updatePropertyPublicSettings(
+  id: string,
+  input: { publicSlug?: string | null; publicEnabled?: boolean },
+) {
+  const existing = await getOwnedProperty(id);
+
+  const data: Prisma.PropertyUpdateInput = {};
+  if (input.publicSlug !== undefined) data.publicSlug = input.publicSlug;
+  if (input.publicEnabled !== undefined) data.publicEnabled = input.publicEnabled;
+
+  // Resolve the effective post-update state to validate the enable/slug invariant.
+  const effectiveSlug =
+    input.publicSlug !== undefined ? input.publicSlug : existing.publicSlug;
+  const effectiveEnabled =
+    input.publicEnabled !== undefined ? input.publicEnabled : existing.publicEnabled;
+  if (effectiveEnabled && !effectiveSlug) {
+    throw Errors.validation('A publicSlug is required before enabling the public link');
+  }
+
+  try {
+    const updated = await prisma.property.update({ where: { id }, data });
+    return serializeProperty(updated);
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      throw Errors.conflict('That public slug is already taken; choose another');
+    }
+    throw e;
+  }
 }
 
 export async function deactivateProperty(id: string) {

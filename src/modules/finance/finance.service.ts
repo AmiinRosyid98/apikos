@@ -167,6 +167,28 @@ export async function deleteCategory(id: string): Promise<{ id: string }> {
   return { id };
 }
 
+/**
+ * Resolve (or create) a tenant expense category by exact name — used by the Maintenance module's
+ * cost→expense seam to find the seeded default "Maintenance" category (creating it if a tenant
+ * somehow lacks it). Idempotent; tolerant of unique-races. Returns the category id.
+ */
+export async function ensureCategoryByName(tenantId: string, name: string): Promise<string> {
+  const existing = await prisma.expenseCategory.findFirst({ where: { name } });
+  if (existing) return existing.id;
+  try {
+    const created = await prisma.expenseCategory.create({
+      data: { tenantId, name, isDefault: false },
+    });
+    return created.id;
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      const again = await prisma.expenseCategory.findFirst({ where: { name } });
+      if (again) return again.id;
+    }
+    throw e;
+  }
+}
+
 // ─────────────────────────── Expenses ───────────────────────────
 async function getExpense(id: string): Promise<ExpenseRow> {
   const e = await prisma.expense.findFirst({
