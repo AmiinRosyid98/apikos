@@ -52,6 +52,12 @@ const envSchema = z.object({
   // unmatched gateway txns / payments / invoices. Default 01:00 daily, Asia/Jakarta (A9).
   RECON_CRON: z.string().default('0 1 * * *'),
 
+  // Accounting integration provider seam (PRD Modul 21, STUB MODE). PER-TENANT config (provider +
+  // encrypted key) is the real switch; this env var is an OPTIONAL process-wide DEFAULT provider
+  // applied only when a tenant has not chosen one (still requires a key to use a real provider).
+  // Empty by default → Stub everywhere (no network — demo mode). Going live is config-only.
+  ACCOUNTING_PROVIDER: z.string().optional().default(''),
+
   JWT_ACCESS_SECRET: z.string().min(16),
   JWT_REFRESH_SECRET: z.string().min(16),
   JWT_ACCESS_TTL: z.string().default('15m'),
@@ -88,6 +94,15 @@ const envSchema = z.object({
   EMAIL_PROVIDER: z.enum(['console', 'resend']).default('console'),
   EMAIL_FROM: z.string().default('KosManager <no-reply@kosmanager.id>'),
   RESEND_API_KEY: z.string().optional(),
+
+  // Web Push (VAPID — PRD §6.18 web-push seam). OPTIONAL: when the public/private keys are absent
+  // the webpush service is a no-op (logs once at boot that push is disabled), GET /push/public-key
+  // returns null, and the app still runs normally. Generate keys with:
+  //   npx web-push generate-vapid-keys
+  // VAPID_SUBJECT must be a mailto: (or https:) URL the push services can contact.
+  VAPID_PUBLIC_KEY: z.string().optional().default(''),
+  VAPID_PRIVATE_KEY: z.string().optional().default(''),
+  VAPID_SUBJECT: z.string().optional().default('mailto:programmer.prahu@gmail.com'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -105,3 +120,5 @@ export const isProd = env.NODE_ENV === 'production';
 export const r2Configured = Boolean(
   env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET && env.R2_ENDPOINT,
 );
+/** Web push is enabled only when BOTH VAPID keys are present (the subject has a safe default). */
+export const webPushConfigured = Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY);

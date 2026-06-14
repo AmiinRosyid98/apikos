@@ -45,8 +45,11 @@ import {
   notificationsRouter,
   notificationPreferencesRouter,
 } from '../modules/notifications/notifications.routes';
+import { pushRouter } from '../modules/push/push.routes';
 import { publicRouter } from '../modules/public/public.routes';
 import { apiKeysRouter } from '../modules/apikeys/apikeys.routes';
+import { brandingRouter } from '../modules/branding/branding.routes';
+import { accountingRouter } from '../modules/accounting/accounting.routes';
 
 const api = Router();
 
@@ -108,7 +111,10 @@ registerUuidParams(protectedApi);
   residentDocumentsRouter,
   notificationsRouter,
   notificationPreferencesRouter,
+  pushRouter,
   apiKeysRouter,
+  brandingRouter,
+  accountingRouter,
 ].forEach(registerUuidParams);
 
 // Nested rooms under a property MUST be registered before the bare properties router so the
@@ -163,9 +169,18 @@ protectedApi.use('/documents', documentsRouter);
 // In-App Notification Module (PRD §6.18): per-user notification center + unread badge + prefs.
 protectedApi.use('/notifications', notificationsRouter);
 protectedApi.use('/notification-preferences', notificationPreferencesRouter);
+// Web Push (PRD §6.18 web-push seam): per-user browser subscriptions (subscribe / unsubscribe /
+// public-key / test). The notify() seam fans out OS/browser pushes to these subscriptions.
+protectedApi.use('/push', pushRouter);
 // Public API key MANAGEMENT (PRD Modul 22) — dashboard, Owner-only, Premium-gated. The EXTERNAL
 // API itself (/api/ext/v1, key-authed) is mounted OUTSIDE this protected router in app.ts.
 protectedApi.use('/api-keys', apiKeysRouter);
+// White-label Branding (PRD Modul 23): GET (All) serves brandName/brandColor/logoUrl for theming;
+// PUT (Owner-only, Premium-gated) sets them. Custom domain DEFERRED.
+protectedApi.use('/branding', brandingRouter);
+// Integrasi Akuntansi (PRD Modul 21 — Premium-only, STUB MODE): config (Owner-only, Premium-gated),
+// status, sync (maps payments→income + expenses→expense journals via the provider seam), entries log.
+protectedApi.use('/accounting', accountingRouter);
 
 api.use(protectedApi);
 

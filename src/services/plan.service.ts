@@ -16,7 +16,17 @@ export type PlanFeature =
   // Public API + API-key management (PRD Modul 22). PREMIUM-ONLY: Basic ❌ / Pro ❌ / Premium ✅.
   // Gates BOTH the management endpoints (POST /api-keys) AND the external API (/api/ext/v1):
   // downgrading off Premium instantly disables every key (enforced in apiKeyAuth).
-  | 'apiAccess';
+  | 'apiAccess'
+  // White-label branding (PRD Modul 23). PREMIUM-ONLY: Basic ❌ / Pro ❌ / Premium ✅. Gates ONLY the
+  // SETTER (PUT /branding). Serving branding (GET /branding) and applying existing branding on the
+  // public landing is plan-independent at the GET layer — but the PUBLIC landing only surfaces
+  // branding for a Premium tenant (so a downgraded tenant's public page reverts to default).
+  | 'whiteLabel'
+  // Integrasi Akuntansi (PRD Modul 21 — Jurnal.id/Accurate). PREMIUM-ONLY: Basic ❌ / Pro ❌ /
+  // Premium ✅. Gates the CONFIG setter (PUT /accounting/config). Status/sync/entries are reachable
+  // by owner/manager/finance but a non-Premium tenant can never enable a provider (config is gated),
+  // so sync runs through the Stub only — going live requires Premium + a real provider key.
+  | 'accountingIntegration';
 
 export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
   basic: {
@@ -27,6 +37,8 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     depositManagement: false,
     checkinOut: false,
     apiAccess: false,
+    whiteLabel: false,
+    accountingIntegration: false,
   },
   pro: {
     whatsapp: true,
@@ -36,6 +48,8 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     depositManagement: true,
     checkinOut: true,
     apiAccess: false,
+    whiteLabel: false,
+    accountingIntegration: false,
   },
   premium: {
     whatsapp: true,
@@ -45,6 +59,8 @@ export const PLAN_FEATURES: Record<string, Record<PlanFeature, boolean>> = {
     depositManagement: true,
     checkinOut: true,
     apiAccess: true,
+    whiteLabel: true,
+    accountingIntegration: true,
   },
 };
 
@@ -108,8 +124,10 @@ export async function assertPlanFeature(tenantId: string, feature: PlanFeature):
   });
   if (!tenant) throw Errors.notFound('Tenant not found');
   if (!featuresForPlan(tenant.subscriptionPlan)[feature]) {
-    // apiAccess is Premium-only; the other features are Pro+. Tailor the upgrade hint.
-    const upgradeTo = feature === 'apiAccess' ? 'Premium' : 'Pro or Premium';
+    // apiAccess + whiteLabel + accountingIntegration are Premium-only; the others are Pro+. Tailor the hint.
+    const premiumOnly =
+      feature === 'apiAccess' || feature === 'whiteLabel' || feature === 'accountingIntegration';
+    const upgradeTo = premiumOnly ? 'Premium' : 'Pro or Premium';
     throw Errors.forbidden(
       `The "${feature}" feature is not available on the ${tenant.subscriptionPlan} plan. Upgrade to ${upgradeTo}.`,
     );

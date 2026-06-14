@@ -4,6 +4,8 @@ import { runWithTenant } from '../../config/tenantStore';
 import { Errors } from '../../utils/errors';
 import { dec } from '../../utils/serialize';
 import { notify } from '../../services/notification.service';
+import { featuresForPlan } from '../../services/plan.service';
+import { buildBrandingPayload } from '../branding/branding.service';
 import type { PublicBookingInput } from './public.validators';
 
 /**
@@ -89,7 +91,29 @@ export async function getPublicProperty(slug: string) {
   const priceRange =
     prices.length > 0 ? { min: Math.min(...prices), max: Math.max(...prices) } : null;
 
+  // White-label branding (PRD Modul 23): the public page renders BRANDED ONLY for a PREMIUM tenant,
+  // so non-Premium public pages stay default (`branding: null`). Read via the raw client (no tenant
+  // context here) but expose ONLY marketing-safe branding fields (name/color/logoUrl) — never the
+  // plan, ids, or any other tenant data.
+  const tenant = await rawPrisma.tenant.findUnique({
+    where: { id: property.tenantId },
+    select: {
+      subscriptionPlan: true,
+      name: true,
+      brandName: true,
+      brandColor: true,
+      logoKey: true,
+    },
+  });
+  // buildBrandingPayload presigns the logo via the tenant-guarded client, so run it INSIDE the
+  // resolved tenant's scope (same pattern as the room read above) so the logo file lookup is scoped.
+  const branding =
+    tenant && featuresForPlan(tenant.subscriptionPlan).whiteLabel
+      ? await runWithTenant({ tenantId: property.tenantId }, () => buildBrandingPayload(tenant))
+      : null;
+
   return {
+    branding,
     property: {
       name: property.name,
       type: property.type,

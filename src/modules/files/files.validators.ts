@@ -1,6 +1,9 @@
 import { z } from 'zod';
 
-export const purposeEnum = z.enum(['ktp', 'selfie', 'room_photo', 'payment_proof']);
+// `logo` = white-label tenant logo (PRD Modul 23). PUBLIC (not private) — it's rendered on the
+// dashboard chrome and the public landing page, so it's served like room photos (presigned, but not
+// access-restricted like ktp/selfie).
+export const purposeEnum = z.enum(['ktp', 'selfie', 'room_photo', 'payment_proof', 'logo']);
 
 // Whitelist: images jpeg/png/webp + pdf. Max 10MB.
 export const ALLOWED_CONTENT_TYPES = [

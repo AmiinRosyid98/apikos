@@ -287,6 +287,7 @@ Invoice number = `INV-{YEAR}-{6-digit seq}`, per-tenant via `tenant_counters`.
 POST /files/presign-upload
 { "purpose":"ktp", "contentType":"image/jpeg", "fileName":"ktp.jpg", "sizeBytes":204800 }
 → 200 { uploadUrl, key, expiresIn, _note? }   // whitelist: jpeg/png/webp/pdf, max 10MB; ktp/selfie private
+// purpose ∈ ktp | selfie | room_photo | payment_proof | logo   (logo = white-label tenant logo, PUBLIC)
 POST /files/presign-download { "key":"<key>" } → 200 { downloadUrl, expiresIn, _note? }  // authorizes key ∈ tenant
 ```
 > MVP-1: R2 not configured → `uploadUrl`/`downloadUrl` are documented **placeholders** (`_note` flags STUB). Wire real R2 presigners in MVP-2.
@@ -302,11 +303,11 @@ POST /files/presign-download { "key":"<key>" } → 200 { downloadUrl, expiresIn,
 
 ```http
 GET /subscription
-→ { plan, status, expiresAt, limits:{maxProperties,maxRooms,maxUsers}, usage:{properties,rooms,users}, features:{whatsapp,paymentGateway,reports,meterUtility} }
+→ { plan, status, expiresAt, limits:{maxProperties,maxRooms,maxUsers}, usage:{properties,rooms,users}, features:{whatsapp,paymentGateway,reports,meterUtility,depositManagement,checkinOut,apiAccess,whiteLabel}, paymentMethods:[...] }
 POST /subscription/change-plan { "plan":"pro" } → { plan, limits, status }   // MVP-1: updates caps only, no payment
 ```
 Plan caps: basic (1/20/2), pro (5/150/10), premium (50/2000/100). `planGuard` returns 403 `PLAN_LIMIT_EXCEEDED` on create when usage ≥ cap.
-Feature flags by plan: `meterUtility` & `reports` → Pro+; `whatsapp` → Pro+; `paymentGateway` → Premium only. A denied feature returns 403 `FORBIDDEN`.
+Feature flags by plan: `meterUtility` & `reports` → Pro+; `whatsapp` → Pro+; `paymentGateway`, `apiAccess` & `whiteLabel` → Premium only. A denied feature returns 403 `FORBIDDEN`.
 
 ---
 
@@ -1335,6 +1336,59 @@ Notifications are created server-side by the `notify()` service, called from exi
 
 ---
 
+## Web Push Module (PRD §6.18 web-push seam) — `/api/v1/push`
+
+Browser/OS push notifications via VAPID + a Service Worker. Per-user (operates on `req.auth.userId`
+within the tenant), `rbacGuard(ALL)`. Push is **OPTIONAL**: when the backend has no VAPID keys the
+service is a no-op, `GET /push/public-key` returns `{ publicKey: null }`, and the routes still
+respond 200 (never 500). The single emit point `notify()` fans out a fire-and-forget push to every
+already role/pref-filtered recipient that has a stored subscription — failure-isolated (never throws,
+never blocks the in-app write); 404/410 endpoints are auto-pruned.
+
+| Method | Path | Roles | Description |
+|---|---|---|---|
+| POST | `/api/v1/push/subscribe` | All | Upsert the caller's browser subscription (unique by `endpoint`) |
+| POST | `/api/v1/push/unsubscribe` | All | Remove the caller's subscription by `endpoint` (idempotent) |
+| GET | `/api/v1/push/public-key` | All | VAPID public key for client subscription (`null` if push disabled) |
+| POST | `/api/v1/push/test` | All | Send a test push to the caller's own subscriptions (best-effort) |
+
+```jsonc
+// POST /push/subscribe  body  (mirrors browser PushSubscription.toJSON(); userAgent optional)
+{
+  "endpoint": "https://fcm.googleapis.com/fcm/send/abc...",
+  "keys": { "p256dh": "BASE64URL...", "auth": "BASE64URL..." },
+  "userAgent": "Mozilla/5.0 ..."
+}
+// → data: { "id": "uuid", "endpoint": "https://...", "createdAt": "ISO" }
+
+// POST /push/unsubscribe  body
+{ "endpoint": "https://fcm.googleapis.com/fcm/send/abc..." }
+// → data: { "removed": true }   (idempotent — always 200, even if nothing matched)
+
+// GET /push/public-key
+// → data: { "publicKey": "BASE64URL-VAPID-PUBLIC-KEY" }  // or { "publicKey": null } when unconfigured
+
+// POST /push/test  (no body / empty {})
+// → data: { "sent": 1, "subscriptions": 2 }   // subscriptions = how many the user has; sent = succeeded
+//   user with 0 subscriptions → { "sent": 0, "subscriptions": 0 }
+```
+
+**Push payload delivered to the Service Worker** (`event.data.json()`), JSON-stringified for
+transport by the backend:
+
+```jsonc
+{ "title": "...", "body": "...", "url": "/invoices/:id" | null, "type": "payment_received" }
+```
+
+VAPID public key delivery to the frontend: build-time `NEXT_PUBLIC_VAPID_PUBLIC_KEY` (kos/.env.local)
+is the primary path; `GET /api/v1/push/public-key` is the runtime fallback / single source of truth.
+
+Backend env (apikos/.env — all OPTIONAL; empty keys disable push): `VAPID_PUBLIC_KEY`,
+`VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (`mailto:`/`https:` URL). Generate with
+`npx web-push generate-vapid-keys`.
+
+---
+
 ## PUBLIC — Landing Page + Public Booking Link — `/api/v1/public/*` (PRD §6.2, §6.13)
 
 > ⚠️ **PUBLIC / NO AUTH.** These two endpoints are **unauthenticated** — NO `Authorization` header,
@@ -1362,6 +1416,8 @@ GET /api/v1/public/properties/kos-melati
 → 200 {
   "success": true,
   "data": {
+    // White-label branding (PRD Modul 23) — present ONLY for a PREMIUM tenant; null otherwise (default).
+    "branding": { "brandName":"Kos Melati Group", "brandColor":"#1A2B3C", "logoUrl":"<presigned|null>" },
     "property": {
       "name": "Kos Melati", "type": "campur",
       "address": "Jl. Mawar No. 1", "city": "Bandung", "province": "Jawa Barat",
@@ -1375,6 +1431,7 @@ GET /api/v1/public/properties/kos-melati
     "priceRange": { "min":1200000, "max":1250000 }   // null when no rooms available
   }
 }
+// branding is marketing-safe (only brandName/brandColor/logoUrl) and null for non-Premium tenants.
 // Unknown / disabled / inactive slug → 404 NOT_FOUND (identical shape — no existence leak).
 ```
 
@@ -1552,3 +1609,114 @@ Request (same schema as the dashboard `POST /bookings`):
 ```
 Room must exist & be `empty` (else **409 CONFLICT**); a room from another tenant → **404**. Response
 **201** with the created booking (`status:"pending"`, `recordedByUserId:null` for API-created bookings).
+
+---
+
+# White-label Branding — `/api/v1/branding` (PRD Modul 23 — Premium-only)
+
+Per-tenant **logo + brand color + brand name**, used to theme the dashboard UI and the public landing
+page. **Custom domain is DEFERRED** (needs DNS infra) — only logo/color/name are shipped.
+
+| Method | Path | Role | Plan gate |
+|---|---|---|---|
+| GET | `/api/v1/branding` | All (authenticated) | none — serves stored branding on any plan |
+| PUT | `/api/v1/branding` | **Owner-only** (manager/admin/finance → 403) | **Premium** (`whiteLabel`; Basic/Pro → 403 `FORBIDDEN`) |
+
+```jsonc
+GET /api/v1/branding
+→ 200 { "success": true, "data": {
+  "brandName": "Kos Mewah",        // override → tenant.name → "KosManager"
+  "brandColor": "#1A2B3C",         // stored hex or null
+  "logoUrl": "<presigned|null>"    // presigned from logoKey (STUB placeholder until R2; null when unset)
+} }
+
+PUT /api/v1/branding                 // Owner-only + Premium. Partial update; null CLEARS a field.
+{
+  "brandName": "Kos Mewah",          // optional, 1..60 chars, or null to clear
+  "brandColor": "#1A2B3C",           // optional, hex ^#[0-9a-fA-F]{6}$ (invalid → 422), or null to clear
+  "logoKey": "tenants/…/logo/….png"  // optional, an uploaded purpose:"logo" file key, or null to clear
+}
+→ 200 { "success": true, "data": { brandName, brandColor, logoUrl } }
+```
+
+- **Logo upload flow:** `POST /files/presign-upload { "purpose":"logo", … }` → take the returned `key`
+  → `PUT /branding { "logoKey": "<key>" }`. A non-null `logoKey` must reference a tracked `logo` file
+  in your tenant, else **422 VALIDATION_ERROR**.
+- **Plan gating:** the SETTER requires Premium (`whiteLabel`); the GETTER is plan-independent. A
+  downgraded tenant keeps its stored branding (GET still returns it), but the **public landing reverts
+  to default** (branding shown only for Premium tenants — see the PUBLIC section).
+- **Audit:** `PUT` writes an immutable `branding.update` audit entry.
+- **Errors:** `422 VALIDATION_ERROR` (bad hex / unknown logoKey / unknown body key), `403 FORBIDDEN`
+  (non-owner, or Basic/Pro plan), `401 UNAUTHENTICATED` (no token).
+
+---
+
+## Integrasi Akuntansi — `/api/v1/accounting` (PRD Modul 21 — Premium-only, STUB MODE)
+
+Maps each posted transaction to a double-entry journal and "syncs" it to an external accounting
+provider (Jurnal.id / Accurate). **STUB MODE:** no real API call — the StubProvider returns a fake
+`JRN-STUB-…` ref + status `synced`. Provider seam mirrors WhatsApp/Payment: plugging in a real
+Jurnal/Accurate key later is **config-only** (set the tenant's `provider` + an encrypted key).
+
+**RBAC** (mirrors finance/P&L — admin EXCLUDED from finance views):
+- `GET /accounting/status` — owner/manager/finance
+- `PUT /accounting/config` — **Owner-only + Premium-gated** (`accountingIntegration`; Basic/Pro → 403)
+- `POST /accounting/sync` — owner/manager/finance (property-scope aware)
+- `GET /accounting/entries` — owner/manager/finance
+
+**Chart of accounts (simple, cash-basis):** `Kas/Bank` (asset), `Pendapatan Sewa` (revenue),
+`Beban {Kategori}` (expense by category, default `Beban Operasional`).
+**Mapping:** payment received → DEBIT `Kas/Bank`, CREDIT `Pendapatan Sewa`; expense → DEBIT
+`Beban {Kategori}`, CREDIT `Kas/Bank`. Every journal is balanced (Σdebit = Σcredit = amount).
+
+```
+GET /api/v1/accounting/status            // owner/manager/finance
+→ 200 { "success": true, "data": {
+    "provider": "stub",                  // 'stub' | 'jurnal' | 'accurate' (the effective provider)
+    "connected": false,                  // true only for a real provider with a key
+    "enabled": false,                    // sync on/off toggle (config)
+    "counts": { "pending": 0, "synced": 2, "failed": 0 },
+    "lastSyncedAt": "2026-06-14T11:00:00.000Z" | null
+} }
+
+PUT /api/v1/accounting/config            // Owner-only + Premium. Partial; only present keys touched.
+{
+  "provider": "stub",                    // optional 'stub'|'jurnal'|'accurate'
+  "enabled": true,                       // optional boolean
+  "apiKey": "secret-or-null",            // optional; stored ENCRYPTED (AES-256-GCM). null clears. stub needs none.
+  "testConnection": true                 // optional; run provider.testConnection() and include result
+}
+→ 200 { "success": true, "data": {
+    "provider": "stub", "enabled": true, "connected": false, "apiKeySet": false,
+    "testConnection": { "ok": true, "message": "Stub accounting provider active …" }   // present iff requested
+} }
+
+POST /api/v1/accounting/sync             // owner/manager/finance. Optional period/property scope.
+{ "month": 6, "year": 2026, "property_id": "<uuid>" }   // all optional; omit → ALL un-synced
+→ 200 { "success": true, "data": { "synced": 2, "skipped": 0, "failed": 0, "total": 2 } }
+// IDEMPOTENT: an already-synced (tenant,entityType,entityId) is SKIPPED, never duplicated.
+
+GET /api/v1/accounting/entries?status=synced&type=income&page=1&limit=20   // owner/manager/finance
+→ 200 { "success": true, "data": [ {
+    "id", "provider": "stub", "entityType": "payment"|"expense", "entityId",
+    "entryType": "income"|"expense", "amount": 800000, "journalRef": "JRN-STUB-…",
+    "status": "pending"|"synced"|"failed",
+    "lines": [ { "account": "Kas/Bank", "debit": 800000, "credit": 0 },
+               { "account": "Pendapatan Sewa", "debit": 0, "credit": 800000 } ],
+    "error": null, "syncedAt", "createdAt"
+} ], "meta": { page, limit, total, totalPages } }
+```
+
+- **Plan gating:** the CONFIG setter requires **Premium** (`accountingIntegration`; Basic/Pro → 403
+  `FORBIDDEN`). `GET /subscription` exposes `features.accountingIntegration`. status/sync/entries are
+  reachable by owner/manager/finance, but a non-Premium tenant can never enable a real provider
+  (config is gated) → sync runs through the Stub only.
+- **Idempotency:** unique `(tenantId, entityType, entityId)` on `accounting_entries` → one journal per
+  source transaction. A re-sync of a `synced` entity is skipped; a `failed`/`pending` row is retried.
+- **Audit:** `PUT` → `accounting.config_update` (never logs the key); `POST /sync` → `accounting.sync`
+  (with synced/skipped/failed counts).
+- **Going live (config-only):** `PUT /accounting/config { provider:"jurnal"|"accurate", apiKey:"…" }`
+  → the factory returns the real provider; sync posts real journals + records a real `journalRef`;
+  `status.provider`/`connected` reflect the live provider. **No code change, no migration.**
+- **Errors:** `403 FORBIDDEN` (non-owner config, or Basic/Pro plan; admin on any accounting route),
+  `422 VALIDATION_ERROR` (bad body/query), `401 UNAUTHENTICATED` (no token).

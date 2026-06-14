@@ -1,7 +1,10 @@
 import { randomUUID } from 'crypto';
+import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { prisma } from '../../config/database';
 import { Errors } from '../../utils/errors';
 import { env, r2Configured } from '../../config/env';
+import { getR2Client, R2_BUCKET } from '../../config/r2';
 import type { PresignUploadInput } from './files.validators';
 
 const PRESIGN_TTL_SECONDS = 900; // 15 min
@@ -27,10 +30,10 @@ function isPrivatePurpose(purpose: string): boolean {
 }
 
 /**
- * B3.4 — presign upload. If R2 is configured, a real presigned PUT URL would be generated
- * here via @aws-sdk/s3-request-presigner. In MVP-1 with no R2 creds we return a DOCUMENTED
- * PLACEHOLDER url (clearly marked) so the contract/flow is exercisable end-to-end.
- *   TODO(MVP-2): wire @aws-sdk/client-s3 + getSignedUrl against R2.
+ * B3.4 — presign upload. When R2 is configured this returns a REAL presigned PUT URL (15 min TTL)
+ * the client uploads to directly. `ContentType` is part of the signed command, so the client MUST
+ * send the same `Content-Type` header on the PUT (the frontend does). When R2 is absent we fall
+ * back to a DOCUMENTED PLACEHOLDER url so the contract/flow stays exercisable in demo mode.
  */
 export async function presignUpload(tenantId: string, userId: string, input: PresignUploadInput) {
   const ext = extFromContentType(input.contentType);
@@ -50,47 +53,54 @@ export async function presignUpload(tenantId: string, userId: string, input: Pre
     },
   });
 
-  const uploadUrl = r2Configured
-    ? buildRealUploadPlaceholder(key) // replace with getSignedUrl in MVP-2
-    : `https://PLACEHOLDER.r2.local/upload?key=${encodeURIComponent(key)}&__stub=1`;
+  if (!r2Configured) {
+    return {
+      uploadUrl: `https://PLACEHOLDER.r2.local/upload?key=${encodeURIComponent(key)}&__stub=1`,
+      key,
+      expiresIn: PRESIGN_TTL_SECONDS,
+      _note: 'STUB: R2 not configured. uploadUrl is a placeholder — no real upload happens. Set R2_* env to go live.',
+    };
+  }
 
-  return {
-    uploadUrl,
-    key,
-    expiresIn: PRESIGN_TTL_SECONDS,
-    _note: r2Configured
-      ? undefined
-      : 'STUB: R2 not configured. uploadUrl is a placeholder — no real upload happens. TODO wire R2 in MVP-2.',
-  };
+  const uploadUrl = await getSignedUrl(
+    getR2Client(),
+    new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, ContentType: input.contentType }),
+    { expiresIn: PRESIGN_TTL_SECONDS },
+  );
+
+  return { uploadUrl, key, expiresIn: PRESIGN_TTL_SECONDS, _note: undefined as string | undefined };
 }
 
 /**
  * Presign download. Authorizes that the key belongs to the caller's tenant (the Prisma
- * tenant-guard scopes findFirst to tenantId). Returns a short-lived GET URL (placeholder in MVP-1).
+ * tenant-guard scopes findFirst to tenantId). For PUBLIC files (room_photo/logo) a permanent
+ * CDN URL is returned when R2_PUBLIC_BASE_URL is set; otherwise a short-lived presigned GET URL.
  */
 export async function presignDownload(key: string) {
   const file = await prisma.fileObject.findFirst({ where: { key } });
   if (!file) throw Errors.notFound('File not found');
 
-  const downloadUrl = r2Configured
-    ? buildRealDownloadPlaceholder(key)
-    : `https://PLACEHOLDER.r2.local/download?key=${encodeURIComponent(key)}&__stub=1`;
+  if (!r2Configured) {
+    return {
+      downloadUrl: `https://PLACEHOLDER.r2.local/download?key=${encodeURIComponent(key)}&__stub=1`,
+      expiresIn: PRESIGN_TTL_SECONDS,
+      _note: 'STUB: R2 not configured. downloadUrl is a placeholder. Set R2_* env to go live.',
+    };
+  }
 
-  return {
-    downloadUrl,
-    expiresIn: PRESIGN_TTL_SECONDS,
-    _note: r2Configured
-      ? undefined
-      : 'STUB: R2 not configured. downloadUrl is a placeholder. TODO wire R2 in MVP-2.',
-  };
-}
+  // Public objects can be served straight from the bucket's public/CDN base if one is configured.
+  if (!file.isPrivate && env.R2_PUBLIC_BASE_URL) {
+    const base = env.R2_PUBLIC_BASE_URL.replace(/\/+$/, '');
+    return { downloadUrl: `${base}/${key}`, expiresIn: 0, _note: undefined as string | undefined };
+  }
 
-// These would be replaced by real presigners; kept as functions to mark the seam.
-function buildRealUploadPlaceholder(key: string): string {
-  return `${env.R2_ENDPOINT}/${env.R2_BUCKET}/${key}?X-Amz-SignedHeaders=host&__todo=presign`;
-}
-function buildRealDownloadPlaceholder(key: string): string {
-  return `${env.R2_ENDPOINT}/${env.R2_BUCKET}/${key}?X-Amz-SignedHeaders=host&__todo=presign`;
+  const downloadUrl = await getSignedUrl(
+    getR2Client(),
+    new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }),
+    { expiresIn: PRESIGN_TTL_SECONDS },
+  );
+
+  return { downloadUrl, expiresIn: PRESIGN_TTL_SECONDS, _note: undefined as string | undefined };
 }
 
 /** Used by residents module to presign KTP/selfie keys for detail view. Null-safe. */

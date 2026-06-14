@@ -1,9 +1,13 @@
 import { createApp } from './app';
 import { env } from './config/env';
 import { prisma } from './config/database';
+import { configureWebPush } from './services/webpush.service';
 
 async function main() {
   const app = createApp();
+
+  // Web Push (VAPID) — configure once at boot. No-op + logs once if VAPID env is absent.
+  configureWebPush();
 
   // Verify DB connectivity on boot (fail fast).
   try {

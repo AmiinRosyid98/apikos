@@ -268,6 +268,22 @@ model Tenant {
   maxUsers              Int                @default(2) @map("max_users")
   waProvider            String?            @map("wa_provider")
   waApiKeyEnc           String?            @map("wa_api_key_enc")
+  // White-label branding (PRD Modul 23 — Premium-only). `brandName` overrides the display name
+  // (defaults to `name` / "KosManager" when null); `brandColor` is a `#RRGGBB` hex theme color;
+  // `logoKey` is the uploaded logo's file key (presigned to a URL on read — null in the R2 stub).
+  // Custom domain is DEFERRED (needs DNS infra) — the `brandDomain` seam is intentionally NOT added
+  // here; document in BACKEND_STATUS when wired.
+  brandName             String?            @map("brand_name")
+  brandColor            String?            @map("brand_color")
+  logoKey               String?            @map("logo_key")
+  // Integrasi Akuntansi (PRD Modul 21 — Premium-only). STUB MODE: `accountingProvider` selects the
+  // implementation ('stub' | 'jurnal' | 'accurate'); `accountingEnabled` toggles sync on/off;
+  // `accountingApiKeyEnc` is the AES-256-GCM-encrypted provider API key (like `waApiKeyEnc`). With no
+  // real provider+key the factory returns the Stub provider (no network). Going live = config-only:
+  // set provider='jurnal'|'accurate' + a key (encrypted) → the factory uses the real provider skeleton.
+  accountingProvider    String?            @map("accounting_provider")
+  accountingEnabled     Boolean            @default(false) @map("accounting_enabled")
+  accountingApiKeyEnc   String?            @map("accounting_api_key_enc")
   createdAt             DateTime           @default(now()) @map("created_at") @db.Timestamptz
   updatedAt             DateTime           @updatedAt @map("updated_at") @db.Timestamptz
 
@@ -300,6 +316,8 @@ model Tenant {
   documents           DocumentRecord[]
   notifications       Notification[]
   apiKeys             ApiKey[]
+  accountingEntries   AccountingEntry[]
+  pushSubscriptions   PushSubscription[]
 
   @@map("tenants")
 }
@@ -342,6 +360,7 @@ model User {
   passwordResets PasswordReset[]
   auditLogs      AuditLog[]
   notifications  Notification[]
+  pushSubscriptions PushSubscription[]
 
   @@index([tenantId])
   @@map("users")
@@ -396,6 +415,28 @@ model RefreshToken {
 
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+// Web Push (VAPID/Service Worker) browser subscription (PRD §6.18 web-push seam). One row per
+// browser/device endpoint. Tenant-scoped + cascade on User, mirroring RefreshToken. `endpoint` is
+// globally unique (the push service URL). Stale endpoints (HTTP 404/410) are auto-pruned by the
+// webpush service.
+model PushSubscription {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  endpoint   String    @unique
+  p256dh     String // public key from the browser subscription (keys.p256dh)
+  auth       String // auth secret from the browser subscription (keys.auth)
+  userAgent  String?   @map("user_agent")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@map("push_subscriptions")
 }
 
 model PasswordReset {
@@ -1164,4 +1205,57 @@ model ApiKey {
   @@index([tenantId])
   @@index([keyPrefix])
   @@map("api_keys")
+}
+
+// ── Integrasi Akuntansi Module (PRD Modul 21 — Premium-only, STUB MODE) ──────────────────────────
+// Maps each posted transaction (a received Payment = income, or an Expense = expense) to a
+// double-entry journal and syncs it to an external accounting provider (Jurnal.id / Accurate). In
+// STUB MODE no real API call is made — the StubProvider returns a fake `JRN-STUB-…` ref + status
+// `synced`. The provider seam (src/modules/accounting/providers/) mirrors the WhatsApp/Payment
+// seams: plugging in a real Jurnal/Accurate key later is CONFIG-ONLY (no code change).
+
+enum AccountingEntityType {
+  payment // a received Payment row → income journal
+  expense // an Expense row → expense journal
+}
+
+enum AccountingEntryType {
+  income
+  expense
+}
+
+enum AccountingSyncStatus {
+  pending
+  synced
+  failed
+}
+
+model AccountingEntry {
+  id         String                @id @default(uuid()) @db.Uuid
+  tenantId   String                @map("tenant_id") @db.Uuid
+  // Which configured provider this entry was synced through ('stub' | 'jurnal' | 'accurate').
+  provider   String
+  entityType AccountingEntityType  @map("entity_type")
+  // The source row's id (Payment.id when entityType=payment, Expense.id when entityType=expense).
+  entityId   String                @map("entity_id") @db.Uuid
+  entryType  AccountingEntryType   @map("entry_type")
+  amount     Decimal               @db.Decimal(12, 2)
+  // External journal reference returned by the provider (Stub → "JRN-STUB-…"). Null until synced.
+  journalRef String?               @map("journal_ref")
+  status     AccountingSyncStatus  @default(pending)
+  // The mapped balanced double-entry: [{ account, debit, credit }, …]. Persisted as JSON so the
+  // exact journal posted is auditable even after the source row changes.
+  lines      Json
+  error      String?
+  syncedAt   DateTime?             @map("synced_at") @db.Timestamptz
+  createdAt  DateTime              @default(now()) @map("created_at") @db.Timestamptz
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // One journal per source transaction → idempotent sync (a re-sync of an already-synced entity is
+  // skipped, never duplicated).
+  @@unique([tenantId, entityType, entityId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("accounting_entries")
 }

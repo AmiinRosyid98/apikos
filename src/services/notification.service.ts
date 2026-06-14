@@ -1,6 +1,7 @@
 import type { NotificationType } from '@prisma/client';
 import { prisma } from '../config/database';
 import type { JwtRole } from '../utils/jwt';
+import * as webpush from './webpush.service';
 
 /**
  * In-App Notification service (PRD §6.18).
@@ -20,12 +21,13 @@ import type { JwtRole } from '../utils/jwt';
  *   - PREFERENCE-AWARE: a user with `notificationPrefs[type] === false` is skipped. NULL prefs (or a
  *     missing key) = enabled (opt-out model).
  *
- * BROWSER-PUSH SEAM (DEFERRED — PRD §6.18 marks web push as deferred):
- *   When VAPID/web-push lands, this is the SINGLE hook point. After the in-app rows are created,
- *   iterate the same resolved recipients and, for each user with a stored push subscription
- *   (a future `push_subscriptions` table) whose prefs allow `type`, call a `webPush.send(sub, {...})`.
- *   No caller changes are needed — every business event already routes through `notify()`. See the
- *   `// TODO(web-push)` marker below.
+ * BROWSER-PUSH SEAM (IMPLEMENTED — PRD §6.18 web-push):
+ *   This is the SINGLE hook point. After the in-app rows are created, we fan out a fire-and-forget
+ *   web push to each already role/pref-filtered recipient that has a stored `push_subscriptions`
+ *   row, via `webpush.sendToUser(userId, payload)`. No caller changes are needed — every business
+ *   event already routes through `notify()`. The fan-out is non-blocking (`void` + `.catch()`) and
+ *   failure-isolated: `webpush.sendToUser` never throws, swallows transport errors, and prunes
+ *   stale (404/410) subscriptions. When VAPID env is absent the webpush service is a no-op.
  */
 
 export const NOTIFICATION_TYPES: NotificationType[] = [
@@ -140,11 +142,24 @@ export async function notify(input: NotifyInput): Promise<number> {
       })),
     });
 
-    // ── TODO(web-push) BROWSER-PUSH SEAM (DEFERRED) ─────────────────────────────────────────────
-    // Iterate `recipients` (already role/pref-filtered) and, for each user that has a stored web-push
-    // subscription (future `push_subscriptions` table), send a push via a `webPush.send(sub, payload)`
-    // helper. Best-effort, never throws, never blocks. No caller changes needed — all events already
-    // flow through notify(). Intentionally NOT implemented in this build (in-app only).
+    // ── BROWSER-PUSH FAN-OUT (web-push) ─────────────────────────────────────────────────────────
+    // Fire-and-forget for each already role/pref-filtered recipient. MUST NOT block or throw:
+    // notify() still returns immediately after the in-app rows are written. Transport errors and
+    // stale-subscription pruning are handled inside webpush.sendToUser (never throws).
+    const pushPayload = {
+      title: input.title,
+      body: input.body,
+      url: input.link ?? null,
+      type: input.type,
+    };
+    for (const r of recipients) {
+      void webpush
+        .sendToUser(r.id, pushPayload)
+        .catch((e) =>
+          // eslint-disable-next-line no-console
+          console.error('[notification] web-push fan-out failed (swallowed):', (e as Error).message),
+        );
+    }
     // ────────────────────────────────────────────────────────────────────────────────────────────
 
     return recipients.length;
